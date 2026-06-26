@@ -110,15 +110,17 @@ void quantize_row_q2_0_ref(const float * GGML_RESTRICT x, block_q2_0 * GGML_REST
 }
 
 // Compute per-token s2 scale factor: ratio of original L2 norm to quantized L2 norm
-// This preserves per-token magnitude: dequant = (qval + d) * s1 * s2
-static float compute_s2_scale(const float * x, const uint8_t * qs, int qk, float min, float half_range) {
+// This preserves per-token magnitude: dequant = (qval + zp) * s1 * s2
+// zp is the zeropoint in quantized units (zp = min / half_range), so that
+// (qval + zp) * half_range == qval * half_range + min.
+static float compute_s2_scale(const float * x, const uint8_t * qs, int qk, float zp, float half_range) {
     double sum_sq_orig = 0.0;
     double sum_sq_dq = 0.0;
     for (int j = 0; j < qk / 4; j++) {
         const uint8_t byte = qs[j];
         for (int b = 0; b < 4; b++) {
             const float qval = (float)((byte >> (b * 2)) & 0x03);
-            const float dq_val = (qval + min) * half_range;
+            const float dq_val = (qval + zp) * half_range;
             sum_sq_dq += (double)dq_val * (double)dq_val;
             sum_sq_orig += (double)x[j*4 + b] * (double)x[j*4 + b];
         }
@@ -155,7 +157,9 @@ static void quantize_q2_kvarn_block(const float * GGML_RESTRICT x, block_q2_kvar
         y->qs[j] = byte;
     }
 
-    y->d  = GGML_FP32_TO_FP16(min);
+    // store the zeropoint in quantized units so that dequant (qval + d) * s1
+    // reconstructs qval * half_range + min exactly
+    y->d  = GGML_FP32_TO_FP16(min * inv_d);
     y->s1 = GGML_FP32_TO_FP16(half_range);
 }
 
