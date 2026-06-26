@@ -8,6 +8,11 @@
 #include <unordered_map>
 #include <vector>
 
+// trigger group quantization when recent region reaches G tokens
+inline bool kvarn_group_trigger(uint32_t n_recent, uint32_t group_size) {
+    return n_recent >= group_size;
+}
+
 struct llama_cparams;
 struct llama_hparams;
 struct llama_model;
@@ -217,10 +222,7 @@ public:
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
 
-private:
-    const llama_model & model;
-    const llama_hparams & hparams;
-
+public:
     struct kv_layer {
         // layer index in the model
         // note: can be different from the layer index in the KV cache
@@ -229,9 +231,21 @@ private:
         ggml_tensor * k;
         ggml_tensor * v;
 
+        // three-region layout (sink/body/recent) for Q2_KVARN
+        ggml_tensor * k_sink   = nullptr;
+        ggml_tensor * k_body   = nullptr;
+        ggml_tensor * k_recent = nullptr;
+        ggml_tensor * v_sink   = nullptr;
+        ggml_tensor * v_body   = nullptr;
+        ggml_tensor * v_recent = nullptr;
+
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
     };
+
+private:
+    const llama_model & model;
+    const llama_hparams & hparams;
 
     bool v_trans = true;  // the value tensor is transposed
 
@@ -319,6 +333,11 @@ private:
     bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo);
 };
+
+// three-region state save/load for Q2_KVARN cache
+size_t llama_kv_cache_state_size_three_region(const llama_kv_cache::kv_layer & layer);
+void   llama_kv_cache_state_write_three_region(const llama_kv_cache::kv_layer & layer, uint8_t * state, size_t size);
+void   llama_kv_cache_state_read_three_region(      llama_kv_cache::kv_layer & layer, const uint8_t * state, size_t size);
 
 class llama_kv_cache_context : public llama_memory_context_i {
 public:

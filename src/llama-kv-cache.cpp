@@ -244,11 +244,28 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+        const bool is_kvarn = type_k == GGML_TYPE_Q2_KVARN;
 
-        has_k && ggml_format_name(k, "cache_k_l%d", il);
-        has_v && ggml_format_name(v, "cache_v_l%d", il);
+        ggml_tensor * k = nullptr;
+        ggml_tensor * v = nullptr;
+
+        ggml_tensor * k_sink   = nullptr;
+        ggml_tensor * k_body   = nullptr;
+        ggml_tensor * k_recent = nullptr;
+        ggml_tensor * v_sink   = nullptr;
+        ggml_tensor * v_body   = nullptr;
+        ggml_tensor * v_recent = nullptr;
+
+        // TODO: three-region layout (sink/body/recent) is not yet wired into the
+        // read/write path. For now, use a single Q2_KVARN tensor like other
+        // quantized types. The region tensors remain NULL.
+        {
+            k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+            v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+
+            has_k && ggml_format_name(k, "cache_k_l%d", il);
+            has_v && ggml_format_name(v, "cache_v_l%d", il);
+        }
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
@@ -260,7 +277,7 @@ llama_kv_cache::llama_kv_cache(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, });
+        layers.push_back({ il, k, v, k_sink, k_body, k_recent, v_sink, v_body, v_recent, k_stream, v_stream, });
     }
 
     if (reuse) {
@@ -2649,4 +2666,109 @@ void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {
 
 void llama_kv_cache_context::set_input_v_rot(ggml_tensor * dst) const {
     kv->set_input_v_rot(dst);
+}
+
+//
+// three-region state save/load for Q2_KVARN cache
+//
+
+static size_t kvarn_tensor_size(const ggml_tensor * t) {
+    return t ? ggml_nbytes(t) : 0;
+}
+
+size_t llama_kv_cache_state_size_three_region(const llama_kv_cache::kv_layer & layer) {
+    size_t size = 0;
+
+    // header: n_sink, n_body, n_recent
+    size += sizeof(uint32_t) * 3;
+
+    // 6 tensors: k_sink, k_body, k_recent, v_sink, v_body, v_recent
+    const ggml_tensor * tensors[6] = {
+        layer.k_sink, layer.k_body, layer.k_recent,
+        layer.v_sink, layer.v_body, layer.v_recent,
+    };
+
+    for (int i = 0; i < 6; ++i) {
+        size += sizeof(uint32_t); // type
+        size += sizeof(uint64_t); // n_bytes
+        size += kvarn_tensor_size(tensors[i]); // raw data
+    }
+
+    return size;
+}
+
+void llama_kv_cache_state_write_three_region(const llama_kv_cache::kv_layer & layer, uint8_t * state, size_t size) {
+    if (!state || size == 0) {
+        return;
+    }
+
+    uint8_t * pos = state;
+
+    // derive cell counts from tensor shapes
+    const uint32_t n_sink   = layer.k_sink   ? layer.k_sink->ne[1]   : 0;
+    const uint32_t n_body   = layer.k_body   ? layer.k_body->ne[1]   : 0;
+    const uint32_t n_recent = layer.k_recent ? layer.k_recent->ne[1] : 0;
+
+    memcpy(pos, &n_sink,   sizeof(n_sink));   pos += sizeof(n_sink);
+    memcpy(pos, &n_body,   sizeof(n_body));   pos += sizeof(n_body);
+    memcpy(pos, &n_recent, sizeof(n_recent)); pos += sizeof(n_recent);
+
+    const ggml_tensor * tensors[6] = {
+        layer.k_sink, layer.k_body, layer.k_recent,
+        layer.v_sink, layer.v_body, layer.v_recent,
+    };
+
+    for (int i = 0; i < 6; ++i) {
+        const ggml_tensor * t = tensors[i];
+        uint32_t type    = t ? (uint32_t)t->type : (uint32_t)GGML_TYPE_F32;
+        uint64_t n_bytes = kvarn_tensor_size(t);
+
+        memcpy(pos, &type,    sizeof(type));    pos += sizeof(type);
+        memcpy(pos, &n_bytes, sizeof(n_bytes)); pos += sizeof(n_bytes);
+
+        if (t && n_bytes > 0) {
+            memcpy(pos, t->data, n_bytes);
+            pos += n_bytes;
+        }
+    }
+}
+
+void llama_kv_cache_state_read_three_region(llama_kv_cache::kv_layer & layer, const uint8_t * state, size_t size) {
+    if (!state || size == 0) {
+        return;
+    }
+
+    const uint8_t * pos = state;
+
+    uint32_t n_sink, n_body, n_recent;
+    memcpy(&n_sink,   pos, sizeof(n_sink));   pos += sizeof(n_sink);
+    memcpy(&n_body,   pos, sizeof(n_body));   pos += sizeof(n_body);
+    memcpy(&n_recent, pos, sizeof(n_recent)); pos += sizeof(n_recent);
+
+    (void)n_sink;
+    (void)n_body;
+    (void)n_recent;
+
+    ggml_tensor * tensors[6] = {
+        layer.k_sink, layer.k_body, layer.k_recent,
+        layer.v_sink, layer.v_body, layer.v_recent,
+    };
+
+    for (int i = 0; i < 6; ++i) {
+        ggml_tensor * t = tensors[i];
+
+        uint32_t type;
+        uint64_t n_bytes;
+        memcpy(&type,    pos, sizeof(type));    pos += sizeof(type);
+        memcpy(&n_bytes, pos, sizeof(n_bytes)); pos += sizeof(n_bytes);
+
+        (void)type;
+
+        if (t && n_bytes > 0) {
+            memcpy(t->data, pos, n_bytes);
+            pos += n_bytes;
+        } else if (n_bytes > 0) {
+            pos += n_bytes;
+        }
+    }
 }
