@@ -123,6 +123,7 @@ if (CUDAToolkit_FOUND)
             template-instances/fattn-vec-instance-q8_0-q8_0.cu
             template-instances/fattn-vec-instance-bf16-bf16.cu
             template-instances/fattn-vec-instance-q2_kvarn-q8_0.cu
+            template-instances/fattn-vec-instance-q2_kvarn-q4_0.cu
             template-instances/fattn-vec-instance-q2_kvarn-f16.cu
             template-instances/fattn-vec-instance-q2_kvarn-q2_kvarn.cu
             template-instances/fattn-vec-instance-f16-q2_kvarn.cu)
