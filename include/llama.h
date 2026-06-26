@@ -381,6 +381,13 @@ extern "C" {
         enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
 
+        // KVarN KV-cache quantization parameters
+        // Only read when type_k or type_v is GGML_TYPE_Q2_KVARN
+        uint32_t kvarn_group_size;      // VarN tile group size (default 128)
+        uint32_t kvarn_sink_tokens;     // First N tokens stored as FP16 (default 128)
+        uint32_t kvarn_recent_tokens;   // Last N tokens stored as FP16 (default 128)
+        uint32_t kvarn_varn_iterations; // VarN iteration count (default 8)
+
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
         // currently works only with CPU execution

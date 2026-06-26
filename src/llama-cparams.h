@@ -63,4 +63,10 @@ struct llama_cparams {
     void * cb_eval_user_data;
 
     llama_context * ctx_other;
+
+    // KVarN KV-cache quantization parameters
+    uint32_t kvarn_group_size;
+    uint32_t kvarn_sink_tokens;
+    uint32_t kvarn_recent_tokens;
+    uint32_t kvarn_varn_iterations;
 };

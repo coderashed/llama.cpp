@@ -211,6 +211,39 @@ static __device__ void cpy_blck_f32_iq4_nl(const char * cxi, char * cdsti) {
     quantize_f32_iq4_nl_block((const float *)cxi, (block_iq4_nl *)cdsti);
 }
 
+static __device__ void quantize_f32_q2_kvarn_block(const float * __restrict__ x, block_q2_kvarn * __restrict__ y) {
+    float min_val = FLT_MAX;
+    float max_val = -FLT_MAX;
+
+    for (int j = 0; j < QK2_KVARN; j++) {
+        const float v = x[j];
+        if (v < min_val) min_val = v;
+        if (v > max_val) max_val = v;
+    }
+
+    const float range = max_val - min_val;
+    const float s1 = range / 3.0f;
+    const float inv_s1 = s1 > 0.0f ? 1.0f / s1 : 0.0f;
+
+    y->d  = __float2half(min_val);
+    y->s1 = __float2half(s1);
+    y->s2 = __float2half(1.0f);
+
+    for (int j = 0; j < QK2_KVARN / 4; ++j) {
+        uint8_t byte = 0;
+        for (int b = 0; b < 4; ++b) {
+            float val = (x[j*4 + b] - min_val) * inv_s1;
+            val = fminf(fmaxf(val, 0.0f), 3.0f);
+            byte |= ((uint8_t)(val + 0.5f)) << (b * 2);
+        }
+        y->qs[j] = byte;
+    }
+}
+
+static __device__ void cpy_blck_f32_q2_kvarn(const char * cxi, char * cdsti) {
+    quantize_f32_q2_kvarn_block((const float *)cxi, (block_q2_kvarn *)cdsti);
+}
+
 template<typename src_t, typename dst_t>
 static __device__ void cpy_1_scalar(const char * cxi, char * cdsti) {
     *(dst_t *) cdsti = ggml_cuda_cast<dst_t>(*(const src_t *) cxi);

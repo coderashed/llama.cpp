@@ -141,6 +141,19 @@ llama_context::llama_context(
 
     cparams.ctx_other = nullptr;
 
+    // KVarN KV-cache quantization parameters
+    if (params.type_k == GGML_TYPE_Q2_KVARN || params.type_v == GGML_TYPE_Q2_KVARN) {
+        cparams.kvarn_group_size      = params.kvarn_group_size;
+        cparams.kvarn_sink_tokens     = params.kvarn_sink_tokens;
+        cparams.kvarn_recent_tokens   = params.kvarn_recent_tokens;
+        cparams.kvarn_varn_iterations = params.kvarn_varn_iterations;
+    } else {
+        cparams.kvarn_group_size      = 0;
+        cparams.kvarn_sink_tokens     = 0;
+        cparams.kvarn_recent_tokens   = 0;
+        cparams.kvarn_varn_iterations = 0;
+    }
+
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
         if (params.ctx_other == nullptr) {
@@ -3533,6 +3546,10 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
+        /*.kvarn_group_size            =*/ 128,
+        /*.kvarn_sink_tokens           =*/ 128,
+        /*.kvarn_recent_tokens         =*/ 128,
+        /*.kvarn_varn_iterations       =*/ 8,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,

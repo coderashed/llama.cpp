@@ -190,6 +190,16 @@ typedef struct {
     uint8_t qs[QK2_0 / 4];   // 2 bits per element
 } block_q2_0;
 static_assert(sizeof(block_q2_0) == sizeof(ggml_half) + QK2_0 / 4, "wrong q2_0 block size/padding");
+#define QK2_KVARN 128
+#define QR2_KVARN 4
+#define QI2_KVARN (QK2_KVARN / (4 * QR2_KVARN))
+typedef struct {
+    uint8_t  qs[QK2_KVARN / 4]; // 32 bytes, 2-bit packed (128 elements)
+    ggml_half d;                 // FP16 zeropoint (not negated)
+    ggml_half s1;                // FP16 primary scale (column)
+    ggml_half s2;                // FP16 secondary scale (row)
+} block_q2_kvarn;
+static_assert(sizeof(block_q2_kvarn) == 32 + 2 + 2 + 2, "wrong q2_kvarn block size/padding");
 
 #define QK4_0 32
 typedef struct {
