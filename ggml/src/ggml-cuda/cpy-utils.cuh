@@ -225,9 +225,12 @@ static __device__ void quantize_f32_q2_kvarn_block(const float * __restrict__ x,
     const float s1 = range / 3.0f;
     const float inv_s1 = s1 > 0.0f ? 1.0f / s1 : 0.0f;
 
-    y->d  = __float2half(min_val);
+    // store the zeropoint in quantized units so that dequant (qval + d) * s1
+    // reconstructs qval * s1 + min_val exactly
+    const float zp = min_val * inv_s1;
+
+    y->d  = __float2half(zp);
     y->s1 = __float2half(s1);
-    y->s2 = __float2half(1.0f);
 
     for (int j = 0; j < QK2_KVARN / 4; ++j) {
         uint8_t byte = 0;
@@ -238,6 +241,22 @@ static __device__ void quantize_f32_q2_kvarn_block(const float * __restrict__ x,
         }
         y->qs[j] = byte;
     }
+
+    // per-block s2 norm correction (matches the CPU reference path)
+    float sum_sq_orig = 0.0f;
+    float sum_sq_dq   = 0.0f;
+    for (int j = 0; j < QK2_KVARN / 4; ++j) {
+        const uint8_t byte = y->qs[j];
+        for (int b = 0; b < 4; ++b) {
+            const float qval  = (float)((byte >> (b * 2)) & 0x03);
+            const float dq    = (qval + zp) * s1;
+            sum_sq_dq   += dq * dq;
+            sum_sq_orig += x[j*4 + b] * x[j*4 + b];
+        }
+    }
+    const float norm_dq = sqrtf(sum_sq_dq);
+    const float s2 = norm_dq > 1e-10f ? sqrtf(sum_sq_orig) / norm_dq : 1.0f;
+    y->s2 = __float2half(s2);
 }
 
 static __device__ void cpy_blck_f32_q2_kvarn(const char * cxi, char * cdsti) {
