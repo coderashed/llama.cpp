@@ -1,0 +1,63 @@
+---
+title: GGML Subsystem Architecture
+---
+flowchart LR
+    subgraph TS["Type System"]
+        T1["ggml_type (enum)"]:::type
+        T2["ggml_type_traits"]:::type
+        T3["ggml_get_type_traits()"]:::type
+    end
+
+    subgraph MA["Memory Arena"]
+        M1["ggml_init_params"]:::mem
+        M2["ggml_context"]:::mem
+        M3["ggml_object (linked list)"]:::mem
+    end
+
+    subgraph TO["Tensor Operations"]
+        O1["Arithmetic (add, mul, sub, div)"]:::ops
+        O2["MatMul (ggml_mul_mat)"]:::ops
+        O3["Normalization (rms_norm)"]:::ops
+        O4["Activations (gelu, silu, relu)"]:::ops
+    end
+
+    subgraph GE["Graph Engine"]
+        G1["ggml_cgraph (nodes/leafs)"]:::graph
+        G2["ggml_build_forward_expand"]:::graph
+        G3["ggml_build_backward_expand"]:::graph
+        G4["ggml_cplan (compute plan)"]:::graph
+    end
+
+    subgraph QZ["Quantization"]
+        Q1["Q4_0 / Q4_1 / ... IQx"]:::quant
+        Q2["ggml-quants.c (SIMD)"]:::quant
+    end
+
+    subgraph BD["Backend Dispatch"]
+        B1["ggml_graph_compute()"]:::backend
+        B2["ggml_threadpool"]:::backend
+        B3["CUDA / Metal / Vulkan"]:::backend
+    end
+
+    TS --> MA
+    TS --> TO
+    TS --> QZ
+    MA --> TO
+    MA --> GE
+    TO --> GE
+    GE --> BD
+    QZ --> BD
+
+    note for TS "ggml/include/ggml.h:389-433 (enum)<br/>ggml/include/ggml.h:2817-2825 (traits)<br/>ggml/include/ggml.h:2827 (getter)"
+    note for MA "ggml/include/ggml.h:659-664 (params)<br/>ggml/src/ggml.c:956-966 (context)<br/>ggml/src/ggml.c:939-948 (object)"
+    note for TO "ggml/include/ggml.h:889-969 (arith)<br/>ggml/include/ggml.h:1418-1421 (matmul)<br/>ggml/include/ggml.h:1361-1405 (norm)<br/>ggml/include/ggml.h:1159-1198 (activations)"
+    note for GE "ggml/src/ggml-impl.h:329-347 (cgraph)<br/>ggml/src/ggml.c:6997-6998 (fwd)<br/>ggml/src/ggml.c:7001-7069 (bwd)<br/>ggml/include/ggml-cpu.h:12-25 (cplan)"
+    note for QZ "ggml/include/ggml.h:389-433 (types)<br/>ggml/src/ggml-quants.c (impl)"
+    note for BD "ggml/src/ggml-cpu/ggml-cpu.c:3308 (compute)<br/>ggml/include/ggml-cpu.h:12-25 (plan)"
+
+    classDef type fill:#e1f5fe,stroke:#0288d1
+    classDef mem fill:#fff3e0,stroke:#f57c00
+    classDef ops fill:#e8f5e9,stroke:#388e3c
+    classDef graph fill:#f3e5f5,stroke:#7b1fa2
+    classDef quant fill:#fce4ec,stroke:#c62828
+    classDef backend fill:#fff8e1,stroke:#f9a825

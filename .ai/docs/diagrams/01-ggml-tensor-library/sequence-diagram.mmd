@@ -1,0 +1,56 @@
+---
+title: GGML Canonical Lifecycle
+---
+sequenceDiagram
+    participant U as User Code
+    participant C as ggml_context
+    participant T as ggml_tensor
+    participant G as ggml_cgraph
+    participant CP as ggml_cplan
+    participant TPool as ggml_threadpool
+
+    U->>C: ggml_init(params)
+    Note over U,C: ggml/include/ggml.h:801<br/>ggml/src/ggml.c:1571-1611
+
+    U->>C: ggml_new_tensor_1d(ctx, type, ne)
+    C->>C: ggml_new_tensor_impl()
+    Note over C: alloc ggml_object header + tensor + data<br/>ggml/src/ggml.c:1726-1802
+    C-->>U: ggml_tensor* x
+
+    U->>C: ggml_set_param(ctx, x)
+    Note over C: sets GGML_TENSOR_FLAG_PARAM<br/>ggml/src/ggml.c:7653-7656
+
+    U->>T: ggml_mul(ctx, x, x)
+    Note over C,T: creates result tensor with op=GGML_OP_MUL, src[0]=x, src[1]=x<br/>ggml/include/ggml.h:955-958
+    T-->>U: ggml_tensor* x2
+
+    U->>T: ggml_add(ctx, ggml_mul(ctx, a, x2), b)
+    Note over C,T: nested call creates add node with src[0]=... src[1]=b<br/>ggml/include/ggml.h:889-892
+    T-->>U: ggml_tensor* f
+
+    U->>G: ggml_new_graph(ctx)
+    Note over G: allocates ggml_cgraph from context<br/>ggml/src/ggml.c:7178-7180
+    G-->>U: ggml_cgraph* gf
+
+    U->>G: ggml_build_forward_expand(gf, f)
+    Note over G: walks src[] chain via hash set (dedup)<br/>inserts into nodes[] and leafs[]<br/>ggml/src/ggml.c:6997-6998
+
+    U->>T: ggml_set_f32(x, 2.0f)
+    Note over T: ggml/include/ggml-cpu.h:43
+
+    U->>U: ggml_set_f32(a, 3.0f)
+    U->>U: ggml_set_f32(b, 4.0f)
+
+    U->>CP: ggml_graph_plan(cgraph, n_threads)
+    Note over CP: returns compute plan with work_size<br/>ggml/include/ggml-cpu.h:66-69
+    CP-->>U: ggml_cplan
+
+    U->>G: ggml_graph_compute(cgraph, cplan)
+    G->>TPool: dispatch nodes in topological order
+    Note over G,TPool: ggml/src/ggml-cpu/ggml-cpu.c:3308-3383
+    TPool-->>G: enum ggml_status
+    G-->>U: GGML_STATUS_SUCCESS
+
+    U->>T: ggml_get_f32_1d(f, 0)
+    Note over T: reads float from tensor data<br/>ggml/include/ggml-cpu.h:52
+    T-->>U: 42.0f

@@ -1,0 +1,225 @@
+classDiagram
+    class llama_vocab {
+        +load(ml, kv)
+        +get_type() enum
+        +n_tokens() uint32
+        +tokenize(text, tokens, ...) int32
+        +token_to_piece(token, buf, ...) int32
+        +detokenize(tokens, text, ...) int32
+        +text_to_token(text) llama_token
+        +byte_to_token(ch) llama_token
+        +token_bos() llama_token
+        +token_eos() llama_token
+        +get_add_bos() bool
+        +get_add_space_prefix() bool
+        +find_bpe_rank(left, right) int
+        +print_info()
+    }
+    note for llama_vocab "src/llama-vocab.h:72"
+
+    class token_data {
+        +text: string
+        +score: float
+        +attr: llama_token_attr
+    }
+    note for token_data "llama-vocab.h:73"
+
+    class normalizer_options {
+        +lowercase: bool
+        +strip_accents: bool
+    }
+    note for normalizer_options "llama-vocab.h:79"
+
+    class impl {
+        -type: llama_vocab_type
+        -pre_type: llama_vocab_pre_type
+        -tokenizer_model: string
+        -tokenizer_pre: string
+        -max_token_len: int
+        -token_to_id: unordered_map
+        -id_to_token: vector~token_data~
+        -bpe_ranks: unordered_map~pair, int~
+        -special_bos_id: llama_token
+        -special_eos_id: llama_token
+        -special_eog_ids: set
+        -cache_special_tokens: vector
+        -cache_token_to_piece: vector~string~
+        -tokenizer: unique_ptr~llm_tokenizer~
+        -precompiled_charsmap: vector~char~
+        -add_space_prefix: bool
+        -add_bos: bool
+        -add_eos: bool
+        -clean_spaces: bool
+        -escape_whitespaces: bool
+        +load(ml, kv)
+        +tokenize(text, add_special, parse_special) vector~llama_token~
+        +token_to_piece(token, buf, len, lstrip, special) int32
+        +detokenize(tokens, n, text, ...) int32
+        +init_tokenizer(type)
+        +tokenizer_st_partition(buffer, parse_special)
+    }
+    note for impl "llama-vocab.cpp:1765"
+
+    class fragment_buffer_variant {
+        +type: enum
+        +token: llama_token
+        +raw_text: string
+        +offset: uint64
+        +length: uint64
+    }
+    note for fragment_buffer_variant "llama-vocab.cpp:1736"
+
+    class llm_tokenizer {
+        <<abstract>>
+        +~llm_tokenizer()
+    }
+    note for llm_tokenizer "llama-vocab.cpp:75"
+
+    class llm_tokenizer_spm {
+    }
+    note for llm_tokenizer_spm "llama-vocab.cpp:110"
+
+    class llm_tokenizer_spm_session {
+        +tokenize(text, output)
+        -try_add_bigram(left, right)
+        -resegment(symbol, output)
+        -symbols: vector~llm_symbol~
+        -work_queue: llm_bigram_spm::queue
+        -rev_merge: map
+    }
+    note for llm_tokenizer_spm_session "llama-vocab.cpp:114"
+
+    class llm_tokenizer_bpe {
+        +regex_exprs: vector~string~
+        +byte_encode: bool
+    }
+    note for llm_tokenizer_bpe "llama-vocab.cpp:279"
+
+    class llm_tokenizer_bpe_session {
+        <<abstract>>
+        +tokenize(text, output)
+        +append_bos(output) bool
+        +append_eos(output) bool
+        +check_double_bos_eos(output)
+        -add_new_bigram(left, right)
+    }
+    note for llm_tokenizer_bpe_session "llama-vocab.cpp:555"
+
+    class llm_tokenizer_hybriddna_session {
+        +tokenize(text, output) override
+    }
+    note for llm_tokenizer_hybriddna_session "llama-vocab.cpp:1621"
+
+    class llm_tokenizer_whitespace_session {
+        +tokenize(text, output) override
+    }
+    note for llm_tokenizer_whitespace_session "llama-vocab.cpp:1698"
+
+    class llm_tokenizer_wpm {
+    }
+    note for llm_tokenizer_wpm "llama-vocab.cpp:758"
+
+    class llm_tokenizer_wpm_session {
+        +tokenize(text, output)
+        +preprocess(text, opts) vector~string~
+    }
+    note for llm_tokenizer_wpm_session "llama-vocab.cpp:762"
+
+    class llm_tokenizer_ugm {
+        +escaped_space: string
+        +xcda_array: uint32_t*
+        +prefix_replacements: char*
+        +token_matcher: naive_trie
+        +user_defined_token_matcher: naive_trie
+        +min_score: float
+        +max_score: float
+        +unknown_token_score: float
+    }
+    note for llm_tokenizer_ugm "llama-vocab.cpp:881"
+
+    class llm_tokenizer_ugm_session {
+        +tokenize(text, output)
+        -normalize(input, normalized)
+        -normalize_prefix(input, offset)
+    }
+    note for llm_tokenizer_ugm_session "llama-vocab.cpp:948"
+
+    class llm_tokenizer_rwkv {
+        +token_matcher: naive_trie
+    }
+    note for llm_tokenizer_rwkv "llama-vocab.cpp:1285"
+
+    class llm_tokenizer_rwkv_session {
+        +tokenize(text, output)
+    }
+    note for llm_tokenizer_rwkv_session "llama-vocab.cpp:1301"
+
+    class llm_tokenizer_plamo2 {
+        +encode(text) vector~llama_token~
+        -build(vocab)
+        -tokens_: vector~string~
+        -bytes_: vector~llama_token~
+        -to_suffix_id_: unordered_map
+        -table_: vector~vector~int32~~
+    }
+    note for llm_tokenizer_plamo2 "llama-vocab.cpp:1337"
+
+    class llm_tokenizer_plamo2_session {
+        +tokenize(text, output)
+    }
+    note for llm_tokenizer_plamo2_session "llama-vocab.cpp:1604"
+
+    class llm_bigram_spm {
+        +left: index
+        +right: index
+        +score: float
+        +size: size_t
+    }
+    note for llm_bigram_spm "llama-vocab.cpp:96"
+
+    class llm_bigram_bpe {
+        +left: index
+        +right: index
+        +text: string
+        +rank: int
+        +size: size_t
+    }
+    note for llm_bigram_bpe "llama-vocab.cpp:263"
+
+    class llm_symbol {
+        +prev: index
+        +next: index
+        +text: char*
+        +n: size_t
+    }
+    note for llm_symbol "llama-vocab.cpp:80"
+
+    class naive_trie {
+        +insert(key, len, value)
+        +get_longest_prefix(key, len)
+        +traverse(c)
+        -children: map~char, naive_trie~
+        -has_value: bool
+        -value: llama_token
+    }
+    note for naive_trie "llama-vocab.cpp:28"
+
+    llama_vocab o-- impl : pimpl >
+    impl o-- llm_tokenizer : tokenizer >
+    impl *-- fragment_buffer_variant
+    impl *-- token_data : id_to_token >
+    impl *-- normalizer_options
+    llm_tokenizer <|-- llm_tokenizer_spm
+    llm_tokenizer <|-- llm_tokenizer_bpe
+    llm_tokenizer <|-- llm_tokenizer_wpm
+    llm_tokenizer <|-- llm_tokenizer_ugm
+    llm_tokenizer <|-- llm_tokenizer_rwkv
+    llm_tokenizer <|-- llm_tokenizer_plamo2
+    llm_tokenizer_bpe_session <|-- llm_tokenizer_hybriddna_session
+    llm_tokenizer_bpe_session <|-- llm_tokenizer_whitespace_session
+    llm_tokenizer_spm_session --> llm_bigram_spm : uses >
+    llm_tokenizer_bpe_session --> llm_bigram_bpe : uses >
+    llm_tokenizer_spm_session *-- llm_symbol : symbols >
+    llm_tokenizer_bpe_session *-- llm_symbol : symbols >
+    llm_tokenizer_ugm --> naive_trie : token_matcher >
+    llm_tokenizer_rwkv --> naive_trie : token_matcher >

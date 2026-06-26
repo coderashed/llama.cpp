@@ -1,0 +1,121 @@
+---
+title: Inference Engine -- Decode Sequence Diagram
+---
+
+sequenceDiagram
+    participant User as User Code
+    participant llama_decode as llama_decode (llama.h:959)
+    participant decode as llama_context::decode (src/llama-context.cpp:1680)
+    participant balloc as llama_batch_allocr (src/llama-batch.h:72)
+    participant memory as llama_memory_i (src/llama-memory.h:73)
+    participant sched as ggml_backend_sched (ggml-backend.h)
+    participant model as llama_model (src/llama-model.h:522)
+    participant graph as llm_graph_context (src/llama-graph.h:789)
+    participant result as llm_graph_result (src/llama-graph.h:703)
+    participant backend as Compute Backend (CPU/CUDA/etc)
+
+    User->>llama_decode: llama_decode(ctx, batch)
+    llama_decode->>decode: ctx->decode(batch)
+
+    activate decode
+
+    decode->>decode: Validate batch (n_tokens>0, token/embd present)
+    decode->>balloc: init(batch, vocab, memory, n_embd, n_seq_max, output_all)
+    activate balloc
+    balloc->>balloc: Validate tokens/seq_ids
+    balloc->>balloc: Auto-fill pos (from memory seq_pos_max)
+    balloc->>balloc: Auto-fill seq_id (default to 0)
+    balloc->>balloc: Auto-fill output flags
+    balloc-->>decode: true/false (invalid => return -1)
+
+    decode->>decode: sched_reserve() [if needed]
+    decode->>memory: memory_update(false)
+    activate memory
+    memory->>memory: Handle pending shifts/copies
+    memory-->>decode: done
+
+    loop Retry once if cache optimize possible
+        decode->>memory: init_batch(balloc, n_ubatch, output_all)
+        activate memory
+        memory->>memory: Split batch into ubatches
+        memory->>memory: find_slot(ubatch) for KV placement
+        alt LLAMA_MEMORY_STATUS_SUCCESS
+            memory-->>decode: mctx with ubatches
+        else LLAMA_MEMORY_STATUS_FAILED_PREPARE
+            memory-->>decode: failure
+            decode->>decode: if !did_optimize: memory_update(true), retry
+            decode->>decode: else return 1 (no slot found)
+        end
+        deactivate memory
+    end
+
+    decode->>decode: output_reserve(n_outputs_all)
+
+    loop for each ubatch via mctx->next()
+        decode->>memory: get_ubatch()
+        memory-->>decode: ubatch
+
+        decode->>decode: Count outputs in ubatch
+
+        decode->>result: can_reuse(gparams)?
+        activate result
+        alt Can reuse
+            result-->>decode: true (skip graph build)
+        else Cannot reuse
+            result->>result: reset()
+            decode->>sched: ggml_backend_sched_reset()
+            decode->>model: build_graph(gparams)
+            activate model
+            model->>graph: build_arch_graph(params) [model-specific]
+            activate graph
+            graph->>graph: build_inp_embd(tok_embd) -> inpL
+            graph->>graph: build_inp_pos() -> inp_pos
+            graph->>graph: build_attn_inp_kv() -> k_idxs, v_idxs, kq_mask
+            loop for each layer il
+                graph->>graph: build_norm(inpL, rms_norm)
+                graph->>graph: build_qkv(layer, cur) -> Qcur, Kcur, Vcur
+                graph->>graph: ggml_rope_ext(Qcur, inp_pos)
+                graph->>graph: build_attn(inp_attn, wo, Qcur, Kcur, Vcur)
+                graph->>graph: ggml_add(attn_out, inpSA) [residual]
+                graph->>graph: build_ffn(ffn_norm, up, gate, down) or build_moe_ffn
+                graph->>graph: ggml_add(ffn_out, ffn_inp) [residual]
+                graph->>graph: build_cvec(cur, il)
+            end
+            graph->>graph: build_norm(cur, rms_norm)
+            graph->>graph: build_lora_mm(output, cur) -> t_logits
+            graph->>graph: build_pooling / build_sampling / build_dense_out
+            graph-->>model: gf
+            deactivate graph
+            model-->>decode: gf (ggml_cgraph)
+            deactivate model
+            decode->>sched: ggml_backend_sched_alloc_graph(sched, gf)
+        end
+        deactivate result
+
+        decode->>result: set_inputs(&ubatch)
+        decode->>decode: graph_compute(gf, batched)
+
+        activate decode
+        decode->>sched: set_n_threads + ggml_backend_sched_graph_compute_async
+        sched->>backend: Execute graph ops
+        backend-->>sched: done (GGML_STATUS)
+        sched-->>decode: status
+        deactivate decode
+
+        alt status != SUCCESS
+            decode-->>User: return error code (2=aborted, -3=failed)
+        end
+
+        decode->>decode: Extract logits (ggml_backend_tensor_get_async)
+        decode->>decode: Extract embeddings (per-token or pooled per-seq)
+        decode->>decode: Extract h_nextn (for MTP)
+        decode->>decode: Extract layer inputs
+        decode->>decode: Copy backend sampling results
+    end
+
+    decode->>decode: Build output_ids mapping
+    decode->>decode: Reorder outputs to match user batch ordering
+
+    decode-->>llama_decode: return 0 (success)
+    llama_decode-->>User: return 0
+    deactivate decode

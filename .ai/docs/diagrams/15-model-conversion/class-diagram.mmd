@@ -1,0 +1,144 @@
+classDiagram
+    class ModelBase {
+        +_model_classes: dict[ModelType, dict[str, type]]
+        +hparams: dict[str, Any]
+        +model_tensors: dict[str, Callable[[], Tensor]]
+        +gguf_writer: GGUFWriter
+        +model_arch: gguf.MODEL_ARCH
+        +block_count: int
+        +tensor_map: gguf.TensorNameMap
+        +ftype: gguf.LlamaFileType
+        +fname_out: Path
+        +dir_model: Path
+        +find_hparam(keys, optional) Any
+        +index_tensors(remote_hf_model_id) dict
+        +filter_tensors(item) tuple
+        +modify_tensors(data_torch, name, bid) Iterable
+        +set_gguf_parameters()
+        +tensor_force_quant(name, new_name, bid, n_dims) QType
+        +generate_extra_tensors() Iterable
+        +prepare_tensors()
+        +prepare_metadata(vocab_only)
+        +write()
+        +write_vocab()
+        +load_hparams(dir_model, is_mistral) dict
+        +register(*names) Callable
+        +from_model_architecture(arch, model_type) type
+        +dequant_model()
+    }
+
+    class TextModel {
+        +model_type: ModelType.TEXT
+        +hf_arch: str
+        +rope_parameters: dict
+        +set_vocab()
+    }
+
+    class MmprojModel {
+        +model_type: ModelType.MMPROJ
+        +model_arch: gguf.MODEL_ARCH.MMPROJ
+        +preprocessor_config: dict
+        +hparams_vision: dict
+        +hparams_audio: dict
+        +n_embd_text: int
+        +get_vision_config()
+        +get_audio_config()
+    }
+
+    class LlamaModel {
+        +undo_permute: bool
+        +is_eagle3: bool
+        +origin_hf_arch: str
+    }
+
+    class QwenModel {
+        +undo_permute: bool
+    }
+
+    class GemmaModel {
+        +undo_permute: bool
+    }
+
+    class GGUFWriter {
+        +fout: list[BufferedWriter]
+        +tensors: list[dict[str, TensorInfo]]
+        +kv_data: list[dict[str, GGUFValue]]
+        +arch: str
+        +path: Path
+        +add_tensor(name, tensor, raw_shape, raw_dtype)
+        +add_tensor_info(name, shape, dtype, nbytes, raw_dtype)
+        +add_key_value(key, val, vtype)
+        +write_header_to_file(path)
+        +write_kv_data_to_file()
+        +write_tensors_to_file(progress)
+        +write_ti_data_to_file()
+        +add_architecture()
+        +close()
+        +flush()
+    }
+
+    class GGUFReader {
+        +byte_order: Literal['I', 'S']
+        +alignment: int
+        +data: np.memmap
+        +fields: OrderedDict[str, ReaderField]
+        +tensors: list[ReaderTensor]
+        +get_field(key) ReaderField
+        +get_tensor(idx) ReaderTensor
+    }
+
+    class LazyTorchTensor {
+        +_tensor_type: torch.Tensor
+        +dtype: torch.dtype
+        +shape: torch.Size
+        +numpy() LazyNumpyTensor
+        +from_eager(t) LazyTorchTensor
+        +from_local_tensor(t) LazyTorchTensor
+        +from_remote_tensor(t) LazyTorchTensor
+        +from_safetensors_slice(slice) LazyTorchTensor
+    }
+
+    class gguf_LazyBase {
+        +_tensor_type: type
+        +_meta: Any
+        +_data: Any
+        +_args: tuple
+        +_func: Callable
+        +to_eager(t) Any
+        +eager_to_meta(t) Any
+        +from_eager(t) Any
+    }
+
+    %% Inheritance hierarchy
+    ModelBase <|-- TextModel : extends
+    ModelBase <|-- MmprojModel : extends
+    TextModel <|-- LlamaModel : per-arch
+    TextModel <|-- QwenModel : per-arch
+    TextModel <|-- GemmaModel : per-arch
+    gguf_LazyBase <|-- LazyTorchTensor : extends
+
+    %% Composition
+    ModelBase o-- GGUFWriter : gguf_writer holds
+    ModelBase o-- gguf.TensorNameMap : tensor_map holds
+    ModelBase *-- hparams : composition
+    ModelBase *-- model_tensors : composition
+    GGUFWriter o-- TensorInfo : tensors contain
+    GGUFWriter o-- GGUFValue : kv_data contain
+
+    %% Registration pattern
+    ModelBase : _model_classes[ModelType][name] = cls
+    ModelBase ..> ModelBase : register decorator fills _model_classes
+    TextModel ..> LlamaModel : @ModelBase.register("LlamaForCausalLM",...)
+    TextModel ..> QwenModel : @ModelBase.register("QWenLMHeadModel",...)
+    TextModel ..> GemmaModel : @ModelBase.register("GemmaForCausalLM",...)
+
+    note for ModelBase "conversion/base.py:75"
+    note for TextModel "conversion/base.py:1100"
+    note for MmprojModel "conversion/base.py:2306"
+    note for LlamaModel "conversion/llama.py:31"
+    note for QwenModel "conversion/qwen.py:14"
+    note for GemmaModel "conversion/gemma.py:17"
+    note for GGUFWriter "gguf-py/gguf/gguf_writer.py:65"
+    note for GGUFReader "gguf-py/gguf/gguf_reader.py:111"
+    note for LazyTorchTensor "conversion/base.py:2485"
+    note for gguf_LazyBase "gguf-py/gguf/lazy.py:77"

@@ -1,0 +1,95 @@
+%% Component diagram: Speculative decoding architecture
+%% All references labeled file:line
+
+graph TB
+    subgraph CLI_Examples ["CLI Examples"]
+        EX_SPEC["examples/speculative/speculative.cpp:33"]
+        EX_SPEC_SIMPLE["examples/speculative-simple/speculative-simple.cpp:16"]
+    end
+
+    subgraph Server_Integration ["Server (tools/server/)"]
+        SRV_CTX["server-context.cpp:161
+server_slot struct"]
+        SRV_SPEC_FIELDS["server slot spec fields:
+spec_draft, spec_prompt,
+spec_i_batch, spec_ckpt
+server-context.cpp:172-177"]
+        SRV_DRAFT_GEN["draft generation loop
+server-context.cpp:2930-2978"]
+        SRV_VERIFY["target verify & accept
+server-context.cpp:3805-3928"]
+    end
+
+    subgraph Common_Layer ["Common Library (common/)"]
+        COMMON_SPEC["common/speculative.h / .cpp
+opaque struct common_speculative
+speculative.h:6, speculative.cpp:1772"]
+        SPEC_IMPL_BASE["common_speculative_impl (base)
+speculative.cpp:129"]
+        IMPL_DRAFT_SIMPLE["draft-simple
+speculative.cpp:175"]
+        IMPL_EAGLE3["draft-eagle3
+speculative.cpp:419"]
+        IMPL_MTP["draft-mtp
+speculative.cpp:896"]
+        IMPL_NGRAM_SIMPLE["ngram-simple
+speculative.cpp:1343"]
+        IMPL_NGRAM_MAP_K["ngram-map-k / ngram-map-k4v
+speculative.cpp:1392"]
+        IMPL_NGRAM_MOD["ngram-mod
+speculative.cpp:1450"]
+        IMPL_NGRAM_CACHE["ngram-cache
+speculative.cpp:1629"]
+        SAMPLING["common/sampling.{h,cpp}
+common_sampler_sample_and_accept_n
+sampling.h:83, sampling.cpp:624"]
+        NGRAM_CACHE_LIB["common/ngram-cache.h"]
+        NGRAM_MAP_LIB["common/ngram-map.h"]
+        PARAMS["common/common.h:361
+common_params_speculative"]
+    end
+
+    subgraph Core_Library ["Core Library (src/)"]
+        LLAMA_API["llama.h / llama.cpp
+llama_decode, llama_encode,
+llama_set_embeddings_nextn,
+llama_get_embeddings_nextn_ith"]
+        LLAMA_EXT["src/llama-ext.h (staging API)
+llama_set_embeddings_nextn
+llama_get_embeddings_nextn_ith
+speculative.cpp:12"]
+    end
+
+    CLI_Examples -->|uses| COMMON_SPEC
+    CLI_Examples -->|uses| SAMPLING
+    CLI_Examples -->|uses| LLAMA_API
+
+    SRV_CTX -->|has field| SRV_SPEC_FIELDS
+    SRV_DRAFT_GEN -->|calls| COMMON_SPEC
+    SRV_VERIFY -->|calls| SAMPLING
+    SRV_VERIFY -->|calls| COMMON_SPEC
+
+    COMMON_SPEC -->|contains| SPEC_IMPL_BASE
+    SPEC_IMPL_BASE ---|subclasses| IMPL_DRAFT_SIMPLE
+    SPEC_IMPL_BASE ---|subclasses| IMPL_EAGLE3
+    SPEC_IMPL_BASE ---|subclasses| IMPL_MTP
+    SPEC_IMPL_BASE ---|subclasses| IMPL_NGRAM_SIMPLE
+    SPEC_IMPL_BASE ---|subclasses| IMPL_NGRAM_MAP_K
+    SPEC_IMPL_BASE ---|subclasses| IMPL_NGRAM_MOD
+    SPEC_IMPL_BASE ---|subclasses| IMPL_NGRAM_CACHE
+
+    IMPL_DRAFT_SIMPLE -.->|needs| LLAMA_API
+    IMPL_EAGLE3 -->|uses| LLAMA_EXT
+    IMPL_EAGLE3 -.->|needs| LLAMA_API
+    IMPL_MTP -->|uses| LLAMA_EXT
+    IMPL_MTP -.->|needs| LLAMA_API
+    IMPL_NGRAM_SIMPLE -->|uses| NGRAM_MAP_LIB
+    IMPL_NGRAM_MAP_K -->|uses| NGRAM_MAP_LIB
+    IMPL_NGRAM_MOD -->|uses| NGRAM_CACHE_LIB
+    IMPL_NGRAM_CACHE -->|uses| NGRAM_CACHE_LIB
+    IMPL_DRAFT_SIMPLE -->|uses| SAMPLING
+    IMPL_EAGLE3 -->|uses| SAMPLING
+    IMPL_MTP -->|uses| SAMPLING
+
+    COMMON_SPEC ---|configured by| PARAMS
+    SRV_SPEC_FIELDS -.->|references| COMMON_SPEC

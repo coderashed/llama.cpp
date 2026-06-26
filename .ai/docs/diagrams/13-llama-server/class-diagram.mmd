@@ -1,0 +1,618 @@
+classDiagram
+    %% ============================================================================
+    %% 13-llama-server Class Diagram
+    %% Each node labelled with file:line of the corresponding struct/class
+    %% ============================================================================
+
+    %% ---------- HTTP Layer ----------
+    class server_http_context {
+        +unique_ptr~Impl~ pimpl
+        +thread thread
+        +atomic~bool~ is_ready
+        +unordered_map~string, handler_t~ handlers
+        +string path_prefix
+        +string hostname
+        +int port
+        +bool is_ssl
+        +string listening_address
+        +init(params) bool
+        +start() bool
+        +stop() void
+        +get(path, handler) void
+        +post(path, handler) void
+        +del(path, handler) void
+        +register_gcp_compat() void
+    }
+    note for server_http_context "server-http.h:64-97"
+
+    class server_http_req {
+        +map~string, string~ params
+        +map~string, string~ headers
+        +string path
+        +string query_string
+        +string body
+        +map~string, uploaded_file~ files
+        +const function~bool()~ & should_stop
+        +get_param(key, def) string
+    }
+    note for server_http_req "server-http.h:46-62"
+
+    class server_http_res {
+        +string content_type
+        +int status
+        +string data
+        +map~string, string~ headers
+        +function~bool(string&)~ next
+        +is_stream() bool
+    }
+    note for server_http_res "server-http.h:20-33"
+
+    class uploaded_file {
+        +raw_buffer data
+        +string filename
+        +string content_type
+    }
+    note for uploaded_file "server-http.h:40-44"
+
+    %% ---------- Task System ----------
+    class server_queue {
+        -int id
+        -bool running
+        -bool sleeping
+        -deque~server_task~ queue_tasks
+        -deque~server_task~ queue_tasks_deferred
+        -mutex mutex_tasks
+        -condition_variable condition_tasks
+        -function~void(server_task)~ callback_new_task
+        -function~void()~ callback_update_slots
+        -function~void(bool)~ callback_sleeping_state
+        +post(task, front) int
+        +post(tasks, front) int
+        +defer(task) void
+        +get_new_id() int
+        +pop_deferred_task(id_slot) void
+        +wait_until_no_sleep() void
+        +is_sleeping() bool
+        +terminate() void
+        +start_loop(idle_sleep_ms) void
+        +on_new_task(callback) void
+        +on_update_slots(callback) void
+        +on_sleeping_state(callback) void
+    }
+    note for server_queue "server-queue.h:13-115"
+
+    class server_response {
+        -bool running
+        -unordered_set~int~ waiting_task_ids
+        -vector~server_task_result_ptr~ queue_results
+        -mutex mutex_results
+        -condition_variable condition_results
+        +add_waiting_task_id(id) void
+        +add_waiting_task_ids(ids) void
+        +remove_waiting_task_id(id) void
+        +remove_waiting_task_ids(ids) void
+        +recv(id_tasks) server_task_result_ptr
+        +recv_with_timeout(id_tasks, timeout) server_task_result_ptr
+        +recv(id_task) server_task_result_ptr
+        +send(result) void
+        +broadcast(result) void
+        +terminate() void
+    }
+    note for server_response "server-queue.h:119-163"
+
+    class server_response_reader {
+        +unordered_set~int~ id_tasks
+        +server_queue & queue_tasks
+        +server_response & queue_results
+        +size_t received_count
+        +bool cancelled
+        +vector~task_result_state~ states
+        +get_new_id() int
+        +post_task(task, front) void
+        +post_tasks(tasks, front) void
+        +has_next() bool
+        +next(should_stop) server_task_result_ptr
+        +wait_for_all(should_stop) batch_response
+        +stop() void
+    }
+    note for server_response_reader "server-queue.h:168-209"
+
+    class server_task {
+        +int id
+        +size_t index
+        +int id_target
+        +int id_slot
+        +int id_parent
+        +vector~server_task~ child_tasks
+        +task_params params
+        +server_tokens tokens
+        +bool cli
+        +string cli_prompt
+        +vector~raw_buffer~ cli_files
+        +server_task_type type
+        +slot_action slot_action
+        +bool metrics_reset_bucket
+        +map~int, float~ set_lora
+        +n_tokens() int
+        +need_embd() bool
+        +need_logits() bool
+        +need_sampling() bool
+        +add_child(id_parent, id_child) void
+        +create_state() task_result_state
+        +is_parent() bool
+        +is_child() bool
+    }
+    note for server_task "server-task.h:133-257"
+
+    class server_task_type {
+        <<enumeration>>
+        SERVER_TASK_TYPE_COMPLETION
+        SERVER_TASK_TYPE_EMBEDDING
+        SERVER_TASK_TYPE_RERANK
+        SERVER_TASK_TYPE_INFILL
+        SERVER_TASK_TYPE_CANCEL
+        SERVER_TASK_TYPE_CONTROL
+        SERVER_TASK_TYPE_NEXT_RESPONSE
+        SERVER_TASK_TYPE_METRICS
+        SERVER_TASK_TYPE_SLOT_SAVE
+        SERVER_TASK_TYPE_SLOT_RESTORE
+        SERVER_TASK_TYPE_SLOT_ERASE
+        SERVER_TASK_TYPE_GET_LORA
+        SERVER_TASK_TYPE_SET_LORA
+    }
+    note for server_task_type "server-task.h:16-30"
+
+    class task_response_type {
+        <<enumeration>>
+        TASK_RESPONSE_TYPE_NONE
+        TASK_RESPONSE_TYPE_OAI_CHAT
+        TASK_RESPONSE_TYPE_OAI_CMPL
+        TASK_RESPONSE_TYPE_OAI_RESP
+        TASK_RESPONSE_TYPE_OAI_ASR
+        TASK_RESPONSE_TYPE_OAI_EMBD
+        TASK_RESPONSE_TYPE_ANTHROPIC
+    }
+    note for task_response_type "server-task.h:33-41"
+
+    class task_params {
+        +bool stream
+        +bool include_usage
+        +bool cache_prompt
+        +bool return_tokens
+        +bool return_progress
+        +int32_t n_keep, n_discard, n_predict
+        +int32_t n_indent, n_cmpl
+        +int32_t n_cache_reuse
+        +int64_t t_max_predict_ms
+        +map~int, float~ lora
+        +vector~string~ antiprompt
+        +vector~string~ response_fields
+        +bool timings_per_token
+        +bool post_sampling_probs
+        +common_params_sampling sampling
+        +common_params_speculative speculative
+        +task_response_type res_type
+        +string oaicompat_model
+        +string oaicompat_cmpl_id
+        +string control_action
+        +string control_cmpl_id
+        +common_chat_parser_params chat_parser_params
+        +common_chat_msg_spans message_spans
+        +int32_t embd_normalize
+    }
+    note for task_params "server-task.h:50-100"
+
+    class task_result_state {
+        +vector~common_chat_msg_diff~ diffs
+        +common_chat_parser_params chat_parser_params
+        +common_chat_msg chat_msg
+        +string generated_text
+        +vector~string~ generated_tool_call_ids
+        +unordered_set~size_t~ sent_tool_call_names
+        +bool thinking_block_started
+        +bool text_block_started
+        +string oai_resp_id
+        +string oai_resp_reasoning_id
+        +string oai_resp_message_id
+        +string oai_resp_fc_id
+        +update_chat_msg(text, partial, diffs, filter) common_chat_msg
+    }
+    note for task_result_state "server-task.h:103-131"
+
+    class server_task_result {
+        <<abstract>>
+        +int id
+        +int id_slot
+        +size_t index
+        +is_error() bool
+        +is_stop() bool
+        +update(state) void
+        +to_json() json*
+        +clone() server_task_result*
+    }
+    note for server_task_result "server-task.h:288-311"
+
+    class server_task_result_cmpl_final {
+        +string content
+        +llama_tokens tokens
+        +bool stream
+        +result_timings timings
+        +stop_type stop
+        +task_response_type res_type
+        +common_chat_msg oaicompat_msg
+        +to_json_oaicompat_chat() json
+        +to_json_oaicompat_chat_stream() json
+        +to_json_oaicompat_resp() json
+        +to_json_anthropic() json
+    }
+    note for server_task_result_cmpl_final "server-task.h:337-410"
+
+    class server_task_result_cmpl_partial {
+        +string content
+        +llama_tokens tokens
+        +int32_t n_decoded
+        +bool is_progress
+        +bool is_begin
+        +completion_token_output prob_output
+        +vector~common_chat_msg_diff~ oaicompat_msg_diffs
+        +to_json_oaicompat_chat() json
+    }
+    note for server_task_result_cmpl_partial "server-task.h:412-468"
+
+    class server_task_result_error {
+        +error_type err_type
+        +string err_msg
+        +int32_t n_prompt_tokens
+        +int32_t n_ctx
+    }
+    note for server_task_result_error "server-task.h:493-506"
+
+    class server_task_result_embd {
+        +vector~vector~float~~ embedding
+        +int32_t n_tokens
+    }
+    note for server_task_result_embd "server-task.h:470-483"
+
+    class server_task_result_metrics {
+        +int n_idle_slots
+        +int n_processing_slots
+        +int n_tasks_deferred
+        +uint64_t n_prompt_tokens_processed_total
+        +uint64_t t_prompt_processing_total
+        +uint64_t n_tokens_predicted_total
+        +uint64_t t_tokens_generation_total
+        +json slots_data
+    }
+    note for server_task_result_metrics "server-task.h:508-536"
+
+    class completion_token_output {
+        +llama_token tok
+        +float prob
+        +string text_to_send
+        +vector~prob_info~ probs
+    }
+    note for completion_token_output "server-task.h:316-335"
+
+    class result_timings {
+        +int32_t cache_n
+        +int32_t prompt_n
+        +double prompt_ms
+        +double predicted_ms
+    }
+
+    %% ---------- Tokens ----------
+    class server_tokens {
+        -bool has_mtmd
+        -map~size_t, mtmd_input_chunk_ptr~ map_idx_to_media
+        -llama_tokens tokens
+        +pos_next() llama_pos
+        +find_media_chunk(idx) pair
+        +push_back(tok) void
+        +push_back(chunk) void
+        +size() size_t
+        +get_tokens() llama_tokens
+        +clone() server_tokens
+        +find_message_spans(delims) common_chat_msg_spans
+    }
+    note for server_tokens "server-common.h:130-228"
+
+    class server_prompt {
+        +server_tokens tokens
+        +server_prompt_data data
+        +list~common_prompt_checkpoint~ checkpoints
+    }
+    note for server_prompt "server-task.h:592-622"
+
+    class server_prompt_cache {
+        +list~server_prompt~ states
+        +size_t limit_size
+        +size_t limit_tokens
+        +alloc(prompt, state_size) server_prompt*
+        +load(prompt, tokens, ctx, slot) bool
+    }
+    note for server_prompt_cache "server-task.h:624-647"
+
+    %% ---------- Context ----------
+    class server_context {
+        -unique_ptr~server_context_impl~ impl
+        +load_model(params) bool
+        +start_loop() void
+        +terminate() void
+        +get_llama_context() llama_context*
+        +get_response_reader() server_response_reader
+        +get_meta() server_context_meta
+        +set_state_callback(callback) void
+    }
+    note for server_context "server-context.h:82-111"
+
+    class server_context_meta {
+        +string build_info
+        +string model_name
+        +set~string~ model_aliases
+        +string model_path
+        +bool has_mtmd
+        +bool has_inp_image, has_inp_audio, has_inp_video
+        +json json_ui_settings
+        +int slot_n_ctx
+        +llama_pooling_type pooling_type
+        +server_chat_params & chat_params
+        +map~string, bool~ chat_template_caps
+        +string bos_token_str, eos_token_str
+        +llama_token fim_pre_token..fim_sep_token
+        +vector~llama_logit_bias~ logit_bias_eog
+        +llama_vocab_type model_vocab_type
+        +int32_t model_n_ctx_train
+        +uint64_t model_n_params
+    }
+    note for server_context_meta "server-context.h:15-53"
+
+    class server_routes {
+        +server_http_context::handler_t get_health
+        +server_http_context::handler_t get_metrics
+        +server_http_context::handler_t post_completions
+        +server_http_context::handler_t post_chat_completions
+        +server_http_context::handler_t post_chat_completions_tok
+        +server_http_context::handler_t post_infill
+        +server_http_context::handler_t post_control
+        +server_http_context::handler_t post_responses_oai
+        +server_http_context::handler_t post_anthropic_messages
+        +server_http_context::handler_t post_embeddings
+        +server_http_context::handler_t post_rerank
+        +server_http_context::handler_t get_slots
+        +server_http_context::handler_t post_slots
+        +server_http_context::handler_t post_tokenize
+        +server_http_context::handler_t post_detokenize
+        +server_http_context::handler_t post_apply_template
+        +server_http_context::handler_t get_lora_adapters
+        +server_http_context::handler_t post_lora_adapters
+        +init_routes() void
+        +get_model_info() json
+    }
+    note for server_routes "server-context.h:117-181"
+
+    class server_state {
+        <<enumeration>>
+        SERVER_STATE_DOWNLOADING
+        SERVER_STATE_LOADING
+        SERVER_STATE_READY
+        SERVER_STATE_SLEEPING
+    }
+    note for server_state "server-context.h:55-60"
+
+    %% ---------- Router ----------
+    class server_models {
+        -map~string, instance_t~ mapping
+        -bool is_reloading
+        -common_preset_context ctx_preset
+        -common_params base_params
+        -string bin_path
+        -common_preset base_preset
+        +server_response sse
+        +load_models() void
+        +has_model(name) bool
+        +get_meta(name) optional~server_model_meta~
+        +get_all_meta() vector~server_model_meta~
+        +load(name) void
+        +load(name, opts) void
+        +unload(name) void
+        +unload_all() void
+        +update_status(name, args) void
+        +remove(name) bool
+        +wait(name, predicate) void
+        +ensure_model_ready(name) bool
+        +proxy_request(req, method, name) server_http_res_ptr
+        +handle_child_state(name, raw_input) void
+    }
+    note for server_models "server-models.h:105-218"
+
+    class server_model_meta {
+        +server_model_source source
+        +common_preset preset
+        +string name
+        +set~string~ aliases
+        +set~string~ tags
+        +int port
+        +server_model_status status
+        +int64_t last_used
+        +vector~string~ args
+        +json loaded_info
+        +json progress
+        +int exit_code
+        +mtmd_caps multimodal
+        +is_ready() bool
+        +is_running() bool
+        +update_args(ctx, bin_path) void
+        +update_caps() void
+    }
+    note for server_model_meta "server-models.h:69-100"
+
+    class server_model_status {
+        <<enumeration>>
+        SERVER_MODEL_STATUS_DOWNLOADING
+        SERVER_MODEL_STATUS_DOWNLOADED
+        SERVER_MODEL_STATUS_UNLOADED
+        SERVER_MODEL_STATUS_LOADING
+        SERVER_MODEL_STATUS_LOADED
+        SERVER_MODEL_STATUS_SLEEPING
+    }
+    note for server_model_status "server-models.h:27-35"
+
+    class server_models_routes {
+        +common_params params
+        +atomic~bool~ stopping
+        +server_models models
+        +server_http_context::handler_t get_router_props
+        +server_http_context::handler_t proxy_get
+        +server_http_context::handler_t proxy_post
+        +server_http_context::handler_t get_router_models
+        +server_http_context::handler_t post_router_models_load
+        +server_http_context::handler_t post_router_models_unload
+        +server_http_context::handler_t get_router_models_sse
+        +server_http_context::handler_t post_router_models
+        +server_http_context::handler_t del_router_models
+        +init_routes() void
+    }
+    note for server_models_routes "server-models.h:239-271"
+
+    class server_http_proxy {
+        +function~void()~ cleanup
+        +thread thread
+        +struct msg_t
+    }
+    note for server_http_proxy "server-models.h:277-305"
+
+    class server_child {
+        -mutex mtx_stdout
+        -atomic~bool~ is_finished_downloading
+        +is_child() bool
+        +get_mode() server_child_mode
+        +run_download(params) int
+        +setup(shutdown_handler) thread
+        +notify_to_router(state_name, payload) void
+    }
+    note for server_child "server-models.h:220-237"
+
+    %% ---------- Tools ----------
+    class server_tool {
+        <<abstract>>
+        +string name
+        +string display_name
+        +bool permission_write
+        +get_definition() json*
+        +invoke(params) json*
+        +to_json() json
+    }
+    note for server_tool "server-tools.h:6-16"
+
+    class server_tools {
+        +vector~unique_ptr~server_tool~~ tools
+        +setup(enabled_tools) void
+        +invoke(name, params) json
+        +server_http_context::handler_t handle_get
+        +server_http_context::handler_t handle_post
+    }
+    note for server_tools "server-tools.h:18-26"
+
+    %% ---------- Server Chat Params ----------
+    class server_chat_params {
+        +bool use_jinja
+        +bool prefill_assistant
+        +common_reasoning_format reasoning_format
+        +map~string, string~ chat_template_kwargs
+        +common_chat_templates_ptr tmpls
+        +bool allow_image
+        +bool allow_audio
+        +bool allow_video
+        +bool enable_thinking
+        +int reasoning_budget
+        +string media_path
+    }
+    note for server_chat_params "server-common.h:287-301"
+
+    %% ---------- Format utilities ----------
+    class server_grammar_trigger {
+        +common_grammar_trigger value
+        +to_json() json
+    }
+    note for server_grammar_trigger "server-common.h:62-85"
+
+    %% ---------- Schema ----------
+    class server_schema {
+        <<namespace>>
+    }
+    note for server_schema "server-schema.h:16-105"
+
+    class field {
+        <<abstract>>
+        +vector~const char*~ name
+        +const char* desc
+        +field_handler custom_handler
+        +set_desc(s) field*
+        +add_alias(n) field*
+        +set_handler(h) field*
+        +eval(ctx, data) void*
+    }
+    note for field "server-schema.h:27-45"
+
+    class field_num {
+        +T & val
+        +T min, max
+        +bool is_hard_limit
+        +set_limits(min, max) field_num*
+    }
+    note for field_num "server-schema.h:48-66"
+
+    class field_eval_context {
+        +task_params & params
+        +const llama_vocab * vocab
+        +const vector~llama_logit_bias~ * logit_bias_eog
+    }
+    note for field_eval_context "server-schema.h:18-23"
+
+    %% ---------- Relationships ----------
+    server_task_result_cmpl_final --|> server_task_result
+    server_task_result_cmpl_partial --|> server_task_result
+    server_task_result_embd --|> server_task_result
+    server_task_result_error --|> server_task_result
+    server_task_result_metrics --|> server_task_result
+    server_task_result_embd --|> server_task_result
+
+    server_response_reader --> server_queue : wraps
+    server_response_reader --> server_response : wraps
+    server_response_reader --> task_result_state : tracks
+
+    server_response --> server_task_result : sends/receives
+
+    server_task --> task_params : has
+    server_task --> server_tokens : has
+    server_task --> task_result_state : create_state()
+
+    server_queue --> server_task : deque
+
+    server_context --> server_queue
+    server_context --> server_response
+    server_context_meta --> server_chat_params : ref
+
+    server_routes --> server_context_meta : meta
+    server_routes --> server_queue : queue_tasks
+    server_routes --> server_response : queue_results
+    server_routes --> server_schema : calls eval_llama_cmpl_schema
+
+    server_models --> server_model_meta : map
+    server_models --> server_child : spawn
+    server_models --> server_http_proxy : proxy_request uses
+
+    server_models_routes --> server_models : models
+
+    server_tools --> server_tool : vector
+
+    field_num --|> field
+    field_str --|> field
+    field_bool --|> field
+    field_json --|> field
+    field_nested --|> field
+
+    field_eval_context --> task_params : ref
+    field_eval_context --> server_schema : eval_llama_cmpl_schema returns
+
+    completion_token_output --> result_timings : part of

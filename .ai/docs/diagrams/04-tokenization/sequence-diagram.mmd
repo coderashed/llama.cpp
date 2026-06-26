@@ -1,0 +1,49 @@
+sequenceDiagram
+    participant User as Caller
+    participant API as llama_tokenize<br>(llama-vocab.cpp:4303)
+    participant Vocab as llama_vocab::tokenize<br>(llama-vocab.cpp:4022)
+    participant Impl as llama_vocab::impl::tokenize<br>(llama-vocab.cpp:3279)
+    participant Partition as tokenizer_st_partition<br>(llama-vocab.cpp:3116)
+    participant Session as Session::tokenize<br>(llama-vocab.cpp:117/597/765/964/1304/1607)
+
+    User->>API: text, text_len, tokens, n_tokens_max, add_special, parse_special
+    API->>Vocab: text, add_special, parse_special
+    Vocab->>Impl: raw_text, add_special, parse_special
+
+    Impl->>Partition: fragment_buffer, parse_special
+    Note over Partition: Split text at special token boundaries.<br>For each special token in cache_special_tokens<br>(sorted by descending text length),<br>find occurrences and split into<br>RAW_TEXT and TOKEN fragments.
+    Partition-->>Impl: fragment_buffer
+
+    Note over Impl: Dispatch by vocab type
+
+    alt Type == SPM
+        Impl->>Session: llm_tokenizer_spm_session
+        Note over Session: 1. Split into UTF-8 codepoints (line 121-131)<br>2. Seed priority queue with bigrams (line 134-136)<br>3. Merge highest-score bigrams (line 139-167)<br>4. Resegment: lookup token, fallback to bytes (line 169-199)
+        Session-->>Impl: output tokens
+    else Type == BPE
+        Impl->>Session: llm_tokenizer_bpe_session
+        Note over Session: 1. Pre-tokenize via unicode_regex_split (line 599)<br>2. Split each word into codepoints (line 624-634)<br>3. Seed priority queue by BPE rank (line 635-636)<br>4. Merge lowest-rank bigrams (line 640-667)<br>5. Lookup token or fallback to bytes (line 686-715)
+        Session-->>Impl: output tokens
+    else Type == WPM
+        Impl->>Session: llm_tokenizer_wpm_session
+        Note over Session: 1. preprocess: NFD normalize, lowercase,<br>   split on ws/punct/chinese (line 812-855)<br>2. Greedy longest-prefix match per word (line 785-807)<br>3. Unknown words -> UNK token (line 806)
+        Session-->>Impl: output tokens
+    else Type == UGM
+        Impl->>Session: llm_tokenizer_ugm_session
+        Note over Session: 1. Normalize via XCDA charsmap (line 970)<br>2. Viterbi search: traverse token trie,<br>   keep highest-score path (line 981-1030)<br>3. Backtrack from end (line 1035-1047)
+        Session-->>Impl: output tokens
+    else Type == RWKV
+        Impl->>Session: llm_tokenizer_rwkv_session
+        Note over Session: Greedy longest-match via trie traversal<br>(line 1307-1328)
+        Session-->>Impl: output tokens
+    else Type == PLAMO2
+        Impl->>Session: llm_tokenizer_plamo2_session
+        Note over Session: Backward DP via suffix table<br>(line 1477-1573)
+        Session-->>Impl: output tokens
+    end
+
+    Note over Impl: Append BOS/EOS/SEP if add_special
+
+    Impl-->>Vocab: output tokens (vector)
+    Vocab-->>API: copy to caller buffer
+    API-->>User: token count or error code

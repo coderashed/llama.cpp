@@ -1,0 +1,101 @@
+sequenceDiagram
+    participant User as User / CLI
+    participant MTMD as libmtmd
+    participant CLIP as Clip Encoder<br>(clip.cpp)
+    participant LLAMA as llama.cpp Core
+    participant TEXT as Text Model (GGUF)
+    participant MMPROJ as mmproj (GGUF)
+
+    User->>MTMD: mtmd_init_from_file(mmproj, text_model, params)
+    MTMD->>MMPROJ: clip_init(fname, params)
+    MMPROJ-->>CLIP: Vision/Audio tensors loaded
+    CLIP->>CLIP: warmup() -- one encode pass
+    CLIP-->>MTMD: clip_ctx (vision + optional audio)
+    MTMD->>MTMD: Validate n_embd matches text model
+    MTMD->>MTMD: init_vision() / init_audio()
+    MTMD->>MTMD: Select image preprocessor by projector type
+    MTMD-->>User: mtmd_context*
+
+    Note over User,LLAMA: === TOKENIZE PHASE ===
+
+    User->>MTMD: mtmd_tokenize(ctx, "Describe: <__media__>", {bitmap})
+
+    MTMD->>MTMD: split_text() at media markers
+
+    alt Lazy bitmap (video)
+        MTMD->>MTMD: expand_lazy_bitmaps() -- callback per frame
+    end
+
+    alt Qwen-VL style (frame merging)
+        MTMD->>MTMD: Merge 2 consecutive frames into 1 batch
+    end
+
+    MTMD->>MTMD: add_media(bitmaps)
+    MTMD->>MTMD: image_preproc->preprocess(img_u8)
+    MTMD->>MTMD: Choose preprocessor strategy
+
+    alt Fixed-size
+        MTMD->>MTMD: resize to model image_size
+    else Dynamic-size
+        MTMD->>MTMD: resize to multiple of patch_size
+    else LLaVA-UHD
+        MTMD->>MTMD: slice_image() into overview + grid tiles
+    end
+
+    MTMD->>MTMD: Normalize pixels (mean/std)
+    MTMD->>MTMD: Add special tokens (img_beg, img_end, slice tokens)
+
+    MTMD->>MTMD: Build mtmd_input_chunks (interleaved text + image chunks)
+    MTMD-->>User: mtmd_input_chunks*
+
+    Note over User,LLAMA: === ENCODE + DECODE PHASE ===
+
+    loop For each chunk
+        User->>MTMD: mtmd_encode_chunk(ctx, chunk)
+
+        alt chunk is TEXT
+            MTMD-->>User: (no-op, text chunk ignored)
+        else chunk is IMAGE
+            MTMD->>CLIP: clip_image_batch_encode(ctx_v, n_threads, batch_f32)
+            CLIP->>CLIP: Build model-specific computation graph
+            CLIP->>CLIP: Execute ggml_backend_sched graph
+
+            alt LLaVA
+                CLIP->>CLIP: ViT + MLP projector (mm_fc_w/b)
+            else Qwen2VL
+                CLIP->>CLIP: 2D conv -> spatial merge -> M-RoPE -> merger
+            else Qwen3VL
+                CLIP->>CLIP: 2D conv -> deepstack features -> merger
+            else InternVL
+                CLIP->>CLIP: Signed pos embed -> ViT -> InternVL projector
+            end
+
+            CLIP-->>MTMD: float embeddings (n_tokens x n_embd)
+            MTMD-->>User: 0 (success)
+        else chunk is AUDIO
+            MTMD->>CLIP: clip_image_batch_encode(ctx_a, ...)
+            CLIP-->>MTMD: float embeddings
+            MTMD-->>User: 0 (success)
+        end
+
+        User->>LLAMA: mtmd_helper_decode_image_chunk() or feed text tokens
+
+        alt TEXT chunk tokens
+            LLAMA->>TEXT: llama_decode(text_batch)
+        else IMAGE/AUDIO embeddings (non-text)
+            LLAMA->>LLAMA: Build llama_batch from embeddings
+            alt M-RoPE model (QwenVL)
+                LLAMA->>LLAMA: Set pos[t,h,w] per token
+            else Non-causal model (Gemma3)
+                LLAMA->>LLAMA: Set non-causal attention mask
+            end
+            LLAMA->>TEXT: llama_decode(embd_batch)
+        end
+
+        LLAMA-->>User: logits, KV cache updated
+    end
+
+    Note over User,LLAMA: === GENERATION PHASE ===
+
+    User->>LLAMA: llama_decode(next_token)
+    LLAMA-->>User: token stream

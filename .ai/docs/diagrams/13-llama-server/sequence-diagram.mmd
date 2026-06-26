@@ -1,0 +1,182 @@
+sequenceDiagram
+    %% ============================================================================
+    %% 13-llama-server Sequence Diagram: /v1/chat/completions (non-streaming)
+    %% ============================================================================
+
+    box LightBlue External
+        participant Client as HTTP Client
+    end
+
+    box LightGreen HTTP Layer (server-http.cpp)
+        participant httplib as cpp-httplib<br/>server-http.cpp:6
+        participant middleware as Pre-routing Middleware<br/>server-http.cpp:271
+        participant post_handler as server_http_context::post()<br/>server-http.cpp:546
+        participant ex_wrapper as ex_wrapper()<br/>server.cpp:40
+        participant process_res as process_handler_response()<br/>server-http.cpp:492
+    end
+
+    box LightBlue Route Handlers (server-context.cpp)
+        participant chat_handler as post_chat_completions<br/>server-context.cpp:4683
+        participant oai_parse as oaicompat_chat_params_parse()<br/>server-common.cpp:904
+        participant cmpl_impl as handle_completions_impl()<br/>server-context.cpp:4049
+        participant schema as eval_llama_cmpl_schema()<br/>server-schema.h:98
+        participant chattmpl as common_chat_templates_apply()<br/>common/chat.cpp:2671
+    end
+
+    box Orange Task Queue (server-queue.cpp)
+        participant reader as server_response_reader<br/>server-queue.h:168
+        participant queue as server_queue<br/>server-queue.h:13
+        participant response as server_response<br/>server-queue.h:119
+    end
+
+    box Red Inference Engine
+        participant slot as server_slot<br/>server-context.cpp:57
+        participant llama as llama_decode()<br/>src/llama-context.cpp
+        participant sampler as Sampling<br/>common/sampling.h
+    end
+
+    box Purple Response Formatting
+        participant result_task as server_task_result_cmpl_final<br/>server-task.h:337
+        participant format as to_json_oaicompat_chat()<br/>server-task.h:397
+    end
+
+
+    %% ====== Request Flow ======
+
+    Client ->> httplib: POST /v1/chat/completions
+    activate httplib
+
+    httplib ->> middleware: pre-routing handler
+    activate middleware
+    middleware -->> httplib: Unhandled (pass through)
+    deactivate middleware
+
+    httplib ->> post_handler: route to registered POST callback
+    activate post_handler
+    post_handler ->> post_handler: parse request into server_http_req
+    post_handler ->> ex_wrapper: handler(req)
+
+    activate ex_wrapper
+
+    ex_wrapper ->> chat_handler: routes.post_chat_completions(req)
+    activate chat_handler
+
+    chat_handler ->> oai_parse: oaicompat_chat_params_parse(body, chat_params, files)
+    activate oai_parse
+    oai_parse ->> oai_parse: Parse messages, tools, response_format
+    oai_parse ->> oai_parse: Handle multimodal content (image/audio/video)
+    oai_parse ->> chattmpl: common_chat_templates_apply(messages, tools)
+    activate chattmpl
+    chattmpl -->> oai_parse: rendered prompt string
+    deactivate chattmpl
+    oai_parse -->> chat_handler: body_parsed (with "prompt")
+    deactivate oai_parse
+
+    chat_handler ->> cmpl_impl: handle_completions_impl(req, COMPLETION, body_parsed, files, OAI_CHAT)
+    activate cmpl_impl
+
+    cmpl_impl ->> reader: create_response() -> server_response_reader
+    activate reader
+
+    cmpl_impl ->> cmpl_impl: process prompt (tokenize or process_mtmd_prompt)
+    cmpl_impl ->> schema: eval_llama_cmpl_schema(vocab, params, n_ctx, data)
+    activate schema
+    schema -->> cmpl_impl: task_params
+    deactivate schema
+
+    cmpl_impl ->> cmpl_impl: Create server_task(type=COMPLETION)
+    cmpl_impl ->> cmpl_impl: Set task_params, tokens, res_type
+    cmpl_impl ->> reader: post_task(task)
+
+    reader ->> response: add_waiting_task_id(task.id)
+    reader ->> queue: post(task)
+
+    deactivate cmpl_impl
+
+    queue ->> queue: start_loop: callback_new_task(task)
+    activate queue
+    queue ->> slot: assign task to slot
+    activate slot
+
+    slot ->> slot: process prompt (maybe reuse KV cache)
+    slot ->> llama: llama_decode() loop
+    activate llama
+    llama -->> slot: logits
+    deactivate llama
+
+    slot ->> sampler: sample next token
+    activate sampler
+    sampler -->> slot: chosen token
+    deactivate sampler
+
+    slot ->> slot: check stop conditions (EOS, limit, antiprompt)
+    slot -->> queue: task completed
+    deactivate slot
+
+    queue ->> response: send(server_task_result_cmpl_final)
+    activate response
+    response -->> reader: recv(id_tasks) returns result
+    deactivate response
+    deactivate queue
+
+    activate cmpl_impl
+    cmpl_impl ->> reader: wait_for_all(should_stop)
+    reader ->> response: recv_with_timeout(id_tasks)
+    response -->> reader: server_task_result_ptr
+
+    cmpl_impl ->> result_task: result->to_json()
+    activate result_task
+    result_task ->> format: to_json_oaicompat_chat()
+    activate format
+    format -->> result_task: OAI chat JSON
+    deactivate format
+    result_task -->> cmpl_impl: json response
+    deactivate result_task
+
+    cmpl_impl ->> cmpl_impl: res->ok(arr[0]) for single result
+    cmpl_impl -->> chat_handler: unique_ptr<server_res_generator>
+    deactivate cmpl_impl
+    deactivate chat_handler
+
+    chat_handler -->> ex_wrapper: server_http_res_ptr
+    deactivate ex_wrapper
+
+    ex_wrapper -->> post_handler: server_http_res_ptr
+    post_handler ->> process_res: process_handler_response(request, response, res)
+    activate process_res
+    process_res ->> process_res: res.status = 200, res.set_content(data)
+    deactivate process_res
+
+    post_handler -->> httplib: response written
+    deactivate post_handler
+
+    httplib -->> Client: HTTP 200 + JSON body
+    deactivate httplib
+
+
+    %% ====== Streaming Variant (alt) ======
+
+    Note over cmpl_impl, process_res: For streaming (stream=true):
+
+    cmpl_impl ->> reader: next(should_stop) for first result
+    cmpl_impl ->> cmpl_impl: Set res->next generator lambda
+    cmpl_impl -->> chat_handler: res with streaming callback
+    chat_handler -->> ex_wrapper: streaming res_ptr
+    ex_wrapper -->> post_handler: streaming res_ptr
+
+    post_handler ->> process_res: set_chunked_content_provider
+    process_res ->> process_res: chunked provider calls res->next(chunk)
+
+    loop for each token
+        reader ->> response: recv_with_timeout(id_tasks, polling_interval)
+        response -->> reader: server_task_result_cmpl_partial
+        reader ->> reader: update(state) tracks diffs
+        reader -->> cmpl_impl: partial result
+        cmpl_impl ->> cmpl_impl: format as SSE (format_oai_sse)
+        cmpl_impl -->> process_res: "data: {...}\n\n" chunk
+        process_res -->> Client: SSE chunk
+    end
+
+    reader ->> response: recv() returns final result
+    cmpl_impl -->> process_res: "data: [DONE]\n\n"
+    process_res -->> Client: final SSE event

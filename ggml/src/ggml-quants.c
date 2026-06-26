@@ -71,6 +71,97 @@ void quantize_row_q1_0_ref(const float * GGML_RESTRICT x, block_q1_0 * GGML_REST
     }
 }
 
+// Compute per-token s2 scale factor: ratio of original L2 norm to quantized L2 norm
+// This preserves per-token magnitude: dequant = (qval + d) * s1 * s2
+static float compute_s2_scale(const float * x, const uint8_t * qs, int qk, float min, float half_range) {
+    double sum_sq_orig = 0.0;
+    double sum_sq_dq = 0.0;
+    for (int j = 0; j < qk / 4; j++) {
+        const uint8_t byte = qs[j];
+        for (int b = 0; b < 4; b++) {
+            const float qval = (float)((byte >> (b * 2)) & 0x03);
+            const float dq_val = (qval + min) * half_range;
+            sum_sq_dq += (double)dq_val * (double)dq_val;
+            sum_sq_orig += (double)x[j*4 + b] * (double)x[j*4 + b];
+        }
+    }
+    float norm_orig = sqrtf((float)sum_sq_orig);
+    float norm_dq   = sqrtf((float)sum_sq_dq);
+    return norm_dq > 1e-10f ? norm_orig / norm_dq : 1.0f;
+}
+
+static void quantize_q2_kvarn_block(const float * GGML_RESTRICT x, block_q2_kvarn * GGML_RESTRICT y) {
+    static const int qk = QK2_KVARN;
+
+    float min = FLT_MAX;
+    float max = -FLT_MAX;
+
+    for (int j = 0; j < qk; j++) {
+        const float v = x[j];
+        if (v < min) min = v;
+        if (v > max) max = v;
+    }
+
+    const float range = max - min;
+    const float half_range = range / 3.0f;
+    const float inv_d = half_range > 0.0f ? 1.0f / half_range : 1.0f;
+
+    for (int j = 0; j < qk / 4; j++) {
+        uint8_t byte = 0;
+        for (int b = 0; b < 4; b++) {
+            float val = (x[j*4 + b] - min) * inv_d;
+            if (val < 0) val = 0;
+            if (val > 3) val = 3;
+            byte |= ((uint8_t)(val + 0.5f)) << (b * 2);
+        }
+        y->qs[j] = byte;
+    }
+
+    y->d  = GGML_FP32_TO_FP16(min);
+    y->s1 = GGML_FP32_TO_FP16(half_range);
+}
+
+void quantize_row_q2_kvarn_ref(const float * GGML_RESTRICT x, block_q2_kvarn * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK2_KVARN;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        quantize_q2_kvarn_block(x + i * qk, &y[i]);
+
+        float s2 = compute_s2_scale(x + i*qk, y[i].qs, qk, GGML_FP16_TO_FP32(y[i].d), GGML_FP16_TO_FP32(y[i].s1));
+        y[i].s2 = GGML_FP32_TO_FP16(s2);
+    }
+}
+
+void quantize_row_q2_kvarn_varn(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k, const float * GGML_RESTRICT S_c, const float * GGML_RESTRICT S_r) {
+    static const int qk = QK2_KVARN;
+
+    (void)S_c;
+    (void)S_r;
+
+    if (k < qk) {
+        quantize_row_q2_kvarn_ref(x, (block_q2_kvarn *)y, k);
+        return;
+    }
+
+    assert(k % qk == 0);
+    const int64_t nb = k / qk;
+
+    block_q2_kvarn * GGML_RESTRICT yb = (block_q2_kvarn *)y;
+
+    for (int64_t i = 0; i < nb; i++) {
+        const float * GGML_RESTRICT x_ptr = x + i * qk;
+
+        quantize_q2_kvarn_block(x_ptr, &yb[i]);
+
+        float s2 = compute_s2_scale(x_ptr, yb[i].qs, qk, GGML_FP16_TO_FP32(yb[i].d), GGML_FP16_TO_FP32(yb[i].s1));
+        yb[i].s2 = GGML_FP32_TO_FP16(s2);
+    }
+}
+
 // reference implementation for deterministic creation of model files
 void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
@@ -435,6 +526,29 @@ void dequantize_row_q4_1(const block_q4_1 * GGML_RESTRICT x, float * GGML_RESTRI
 
             y[i*qk + j + 0   ] = x0*d + m;
             y[i*qk + j + qk/2] = x1*d + m;
+        }
+    }
+}
+
+void dequantize_row_q2_kvarn(const block_q2_kvarn * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK2_KVARN;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d  = GGML_FP16_TO_FP32(x[i].d);
+        const float s1 = GGML_FP16_TO_FP32(x[i].s1);
+        const float s2 = GGML_FP16_TO_FP32(x[i].s2);
+        const float combined_scale = s1 * s2;
+
+        for (int j = 0; j < qk / 4; j++) {
+            const uint8_t byte = x[i].qs[j];
+            for (int b = 0; b < 4; b++) {
+                const float qval = (float)((byte >> (b * 2)) & 0x03);
+                y[i * qk + j * 4 + b] = (qval + d) * combined_scale;
+            }
         }
     }
 }
@@ -2046,6 +2160,22 @@ size_t quantize_q1_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, 
     char * qrow = (char *)dst;
     for (int64_t row = 0; row < nrow; ++row) {
         quantize_row_q1_0_ref(src, (block_q1_0*)qrow, n_per_row);
+        src += n_per_row;
+        qrow += row_size;
+    }
+    return nrow * row_size;
+}
+
+
+size_t quantize_q2_kvarn(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    if (!quant_weights) {
+        quantize_row_q2_kvarn_ref(src, dst, (int64_t)nrow * n_per_row);
+        return nrow * ggml_row_size(GGML_TYPE_Q2_KVARN, n_per_row);
+    }
+    size_t row_size = ggml_row_size(GGML_TYPE_Q2_KVARN, n_per_row);
+    char * qrow = (char *)dst;
+    for (int64_t row = 0; row < nrow; ++row) {
+        quantize_row_q2_kvarn_ref(src, (block_q2_kvarn *)qrow, n_per_row);
         src += n_per_row;
         qrow += row_size;
     }

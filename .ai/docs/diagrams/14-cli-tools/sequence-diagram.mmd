@@ -1,0 +1,50 @@
+---
+title: Sequence Diagram — Multi-Tool Init Flow (common_params_parse)
+---
+
+sequenceDiagram
+    participant User as User (argv)
+    participant Tool as Tool main()
+    participant Parser as common_params_parse<br><code>arg.cpp:1013</code>
+    participant ParserInit as common_params_parser_init<br><code>arg.cpp:1126</code>
+    participant Download as common_models_handler<br><code>arg.cpp:353-536</code>
+    participant Engine as llama.h / LLM
+
+    User ->> Tool: argv, argc
+    Tool ->> Parser: common_params_parse()
+    Parser ->> ParserInit: common_params_parser_init(params, ex)
+    ParserInit ->> ParserInit: build add_opt chain<br>~200 option definitions
+    ParserInit -->> Parser: ctx_arg (options + params)
+    Parser ->> Parser: common_params_parse_ex()
+
+    alt Environment variables
+        Parser ->> Parser: for each option: get_value_from_env()
+    end
+
+    Parser ->> Parser: parse_cli_args()<br>arg.cpp:590-651
+
+    Parser ->> Download: common_models_handler_init()
+    Download ->> Download: build HF download plan<br>arg.cpp:376-381
+    Download -->> Parser: handler
+
+    Parser ->> Download: common_models_handler_apply()
+    alt Has HF repo
+        Download ->> Download: download from HuggingFace<br>arg.cpp:487-499
+    end
+    alt Has URL
+        Download ->> Download: build_url_tasks()<br>arg.cpp:387-423
+    end
+    alt Has RPC servers
+        Download ->> Download: add_rpc_devices()<br>arg.cpp:899-918
+    end
+    Download -->> Parser: params.model.path set
+
+    alt --help / --usage
+        Parser ->> Parser: common_params_print_usage()<br>arg.cpp:727-763
+        Parser -->> Tool: exit(0)
+    end
+
+    Parser -->> Tool: return true
+
+    Tool ->> Engine: model load + decode
+    note over Tool, Engine: tool-specific work

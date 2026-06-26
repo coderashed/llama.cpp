@@ -1,0 +1,151 @@
+%% class-diagram.mmd -- Key interfaces in the ggml-backend system
+%% Each node cites file:line of the struct definition.
+
+classDiagram
+    class ggml_backend_reg_i {
+        <<interface>>
+        +get_name() const char*
+        +get_device_count() size_t
+        +get_device(index) ggml_backend_dev_t
+        +get_proc_address(name) void*
+    }
+    note for ggml_backend_reg_i "ggml-backend-impl.h:214-224"
+
+    class ggml_backend_reg {
+        +int api_version
+        +ggml_backend_reg_i iface
+        +void* context
+    }
+    note for ggml_backend_reg "ggml-backend-impl.h:226-230"
+
+    class ggml_backend_device_i {
+        <<interface>>
+        +get_name() const char*
+        +get_description() const char*
+        +get_memory(free, total) void
+        +get_type() ggml_backend_dev_type
+        +get_props(props) void
+        +init_backend(params) ggml_backend_t
+        +get_buffer_type() ggml_backend_buffer_type_t
+        +get_host_buffer_type() ggml_backend_buffer_type_t
+        +buffer_from_host_ptr(ptr,size) ggml_backend_buffer_t
+        +supports_op(op) bool
+        +supports_buft(buft) bool
+        +offload_op(op) bool
+        +event_new/event_free/event_synchronize()
+    }
+    note for ggml_backend_device_i "ggml-backend-impl.h:160-202"
+
+    class ggml_backend_device {
+        +ggml_backend_device_i iface
+        +ggml_backend_reg_t reg
+        +void* context
+    }
+    note for ggml_backend_device "ggml-backend-impl.h:204-208"
+
+    class ggml_backend_i {
+        <<interface>>
+        +get_name() const char*
+        +free() void
+        +set_tensor_async/get_tensor_async/cpy_tensor_async()
+        +synchronize() void
+        +graph_plan_create/free/update/compute()
+        +graph_compute(cgraph) ggml_status
+        +event_record/event_wait()
+        +graph_optimize(cgraph) void
+    }
+    note for ggml_backend_i "ggml-backend-impl.h:105-140"
+
+    class ggml_backend {
+        +ggml_guid_t guid
+        +ggml_backend_i iface
+        +ggml_backend_dev_t device
+        +void* context
+    }
+    note for ggml_backend "ggml-backend-impl.h:142-147"
+
+    class ggml_backend_buffer_type_i {
+        <<interface>>
+        +get_name() const char*
+        +alloc_buffer(size) ggml_backend_buffer_t
+        +get_alignment() size_t
+        +get_max_size() size_t
+        +get_alloc_size(tensor) size_t
+        +is_host() bool
+    }
+    note for ggml_backend_buffer_type_i "ggml-backend-impl.h:17-29"
+
+    class ggml_backend_buffer_type {
+        +ggml_backend_buffer_type_i iface
+        +ggml_backend_dev_t device
+        +void* context
+    }
+    note for ggml_backend_buffer_type "ggml-backend-impl.h:31-35"
+
+    class ggml_backend_buffer_i {
+        <<interface>>
+        +free_buffer() void
+        +get_base() void*
+        +init_tensor(tensor) ggml_status
+        +memset_tensor/set_tensor/get_tensor()
+        +set_tensor_2d/get_tensor_2d()
+        +cpy_tensor(src,dst) bool
+        +clear(value) void
+        +reset() void
+    }
+    note for ggml_backend_buffer_i "ggml-backend-impl.h:41-62"
+
+    class ggml_backend_buffer {
+        +ggml_backend_buffer_i iface
+        +ggml_backend_buffer_type_t buft
+        +void* context
+        +size_t size
+        +ggml_backend_buffer_usage usage
+    }
+    note for ggml_backend_buffer "ggml-backend-impl.h:64-70"
+
+    class ggml_backend_sched_split {
+        +int backend_id
+        +int i_start
+        +int i_end
+        +ggml_tensor* inputs[30]
+        +int n_inputs
+        +ggml_cgraph graph
+    }
+    note for ggml_backend_sched_split "ggml-backend.cpp:764-772"
+
+    class ggml_backend_sched {
+        +bool is_reset
+        +bool is_alloc
+        +int n_backends
+        +ggml_backend_t backends[16]
+        +ggml_backend_buffer_type_t bufts[16]
+        +ggml_gallocr_t galloc
+        +ggml_hash_set hash_set
+        +int* hv_tensor_backend_ids
+        +ggml_tensor** hv_tensor_copies
+        +int* node_backend_ids
+        +int* leaf_backend_ids
+        +int* prev_node_backend_ids
+        +int* prev_leaf_backend_ids
+        +ggml_cgraph graph
+        +ggml_backend_sched_split* splits
+        +int n_splits
+        +int n_copies
+        +ggml_backend_event_t events[16][4]
+        +ggml_tensor* graph_inputs[30]
+    }
+    note for ggml_backend_sched "ggml-backend.cpp:774-828"
+
+    ggml_backend_reg *-- ggml_backend_reg_i : iface
+    ggml_backend_device *-- ggml_backend_device_i : iface
+    ggml_backend_device --> ggml_backend_reg : reg
+    ggml_backend *-- ggml_backend_i : iface
+    ggml_backend --> ggml_backend_device : device
+    ggml_backend_buffer_type *-- ggml_backend_buffer_type_i : iface
+    ggml_backend_buffer_type --> ggml_backend_device : device
+    ggml_backend_buffer *-- ggml_backend_buffer_i : iface
+    ggml_backend_buffer --> ggml_backend_buffer_type : buft
+    ggml_backend_sched "1" --> "16" ggml_backend : backends[]
+    ggml_backend_sched "1" --> "16" ggml_backend_buffer_type : bufts[]
+    ggml_backend_sched "1" *-- "*" ggml_backend_sched_split : splits[]

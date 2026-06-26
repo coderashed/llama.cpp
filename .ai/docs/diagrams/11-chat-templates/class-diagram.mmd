@@ -1,0 +1,420 @@
+classDiagram
+    %% ============================================================================
+    %% 11-Chat-Templates Class Diagram
+    %% Each node labelled with file:line of the corresponding struct/class
+    %% ============================================================================
+
+    %% ---------- Public C API ----------
+    class llama_chat_message {
+        +const char* role
+        +const char* content
+    }
+    note for llama_chat_message "include/llama.h:436-439"
+
+    %% ---------- Internal Chat Types ----------
+    class common_chat_msg {
+        +string role
+        +string content
+        +vector~common_chat_msg_content_part~ content_parts
+        +vector~common_chat_tool_call~ tool_calls
+        +string reasoning_content
+        +string tool_name
+        +string tool_call_id
+        +json to_json_oaicompat() const
+        +string render_content() const
+        +bool empty() const
+        +bool contains_media() const
+        +set_tool_call_ids()
+    }
+    note for common_chat_msg "common/chat.h:81-129"
+
+    class common_chat_tool_call {
+        +string name
+        +string arguments
+        +string id
+    }
+    note for common_chat_tool_call "common/chat.h:28-36"
+
+    class common_chat_msg_content_part {
+        +string type
+        +string text
+    }
+    note for common_chat_msg_content_part "common/chat.h:38-50"
+
+    class common_chat_msg_diff {
+        +string reasoning_content_delta
+        +string content_delta
+        +size_t tool_call_index
+        +common_chat_tool_call tool_call_delta
+        +compute_diffs()$ vector~common_chat_msg_diff~
+    }
+    note for common_chat_msg_diff "common/chat.h:131-144"
+
+    class common_chat_msg_delimiter {
+        +common_chat_role role
+        +string delimiter
+        +llama_tokens tokens
+    }
+    note for common_chat_msg_delimiter "common/chat.h:193-197"
+
+    class common_chat_msg_delimiters {
+        +vector~common_chat_msg_delimiter~ delimiters
+        +add()
+        +tokenize()
+        +split()
+        +to_json()
+    }
+    note for common_chat_msg_delimiters "common/chat.h:199-215"
+
+    class common_chat_msg_span {
+        +common_chat_role role
+        +size_t pos
+        +size_t len
+        +valid()
+    }
+    note for common_chat_msg_span "common/chat.h:157-165"
+
+    class common_chat_msg_spans {
+        +vector~common_chat_msg_span~ spans
+        +add()
+        +is_user_start()
+        +last_user_message_pos()
+    }
+    note for common_chat_msg_spans "common/chat.h:167-191"
+
+    %% ---------- Template Management ----------
+    class common_chat_template {
+        +jinja::program prog
+        +string bos_tok
+        +string eos_tok
+        +string src
+        +chat_template_caps caps
+        +source() const string&
+        +bos_token() const string&
+        +eos_token() const string&
+        +original_caps() const chat_template_caps
+    }
+    note for common_chat_template "common/chat.h:52-79"
+
+    class common_chat_templates {
+        -bool add_bos
+        -bool add_eos
+        -bool has_explicit_template
+        -unique_ptr~common_chat_template~ template_default
+        -unique_ptr~common_chat_template~ template_tool_use
+    }
+    note for common_chat_templates "common/chat.cpp:334-340"
+
+    class common_chat_templates_inputs {
+        +vector~common_chat_msg~ messages
+        +string grammar
+        +string json_schema
+        +bool add_generation_prompt
+        +common_chat_continuation continue_final_message
+        +bool use_jinja
+        +vector~common_chat_tool~ tools
+        +common_chat_tool_choice tool_choice
+        +bool parallel_tool_calls
+        +common_reasoning_format reasoning_format
+        +bool enable_thinking
+        +time_point now
+        +map~string,string~ chat_template_kwargs
+        +bool add_bos
+        +bool add_eos
+        +bool force_pure_content
+    }
+    note for common_chat_templates_inputs "common/chat.h:249-267"
+
+    class common_chat_params {
+        +common_chat_format format
+        +string prompt
+        +string grammar
+        +bool grammar_lazy
+        +string generation_prompt
+        +bool supports_thinking
+        +string thinking_start_tag
+        +string thinking_end_tag
+        +vector~common_grammar_trigger~ grammar_triggers
+        +vector~string~ preserved_tokens
+        +vector~string~ additional_stops
+        +string parser
+        +common_chat_msg_delimiters message_delimiters
+    }
+    note for common_chat_params "common/chat.h:269-283"
+
+    class common_chat_parser_params {
+        +common_chat_format format
+        +common_reasoning_format reasoning_format
+        +bool reasoning_in_content
+        +string generation_prompt
+        +bool parse_tool_calls
+        +bool is_continuation
+        +bool echo
+        +bool debug
+        +common_peg_arena parser
+    }
+    note for common_chat_parser_params "common/chat.h:287-303"
+
+    %% ---------- Jinja Engine ----------
+    class jinja::program {
+        +statements body
+    }
+    note for jinja::program "common/jinja/runtime.h:146-155"
+
+    class jinja::statement {
+        +size_t pos
+        +execute(ctx) value
+    }
+    note for jinja::statement "common/jinja/runtime.h:105-119"
+
+    class jinja::expression {
+        <<abstract>>
+    }
+    note for jinja::expression "common/jinja/runtime.h:140-142"
+
+    class jinja::context {
+        +shared_ptr~string~ src
+        +time_t current_time
+        +get_val(name) value
+        +set_val(name, val)
+        +print_vars()
+    }
+    note for jinja::context "common/jinja/runtime.h:50-100"
+
+    class jinja::runtime {
+        +context& ctx
+        +execute(program) value_array
+        +gather_string_parts(val)$ value_string
+    }
+    note for jinja::runtime "common/jinja/runtime.h:623-651"
+
+    class jinja::lexer {
+        +tokenize(source) lexer_result
+    }
+    note for jinja::lexer "common/jinja/lexer.h:86-150"
+
+    class jinja::caps {
+        +bool supports_tools
+        +bool supports_tool_calls
+        +bool supports_system_role
+        +bool supports_parallel_tool_calls
+        +bool supports_preserve_reasoning
+        +bool supports_string_content
+        +bool supports_typed_content
+        +bool supports_object_arguments
+        +to_map() map~string,bool~
+        +to_string() string
+    }
+    note for jinja::caps "common/jinja/caps.h:10-28"
+
+    class jinja::value_t {
+        +int64_t val_int
+        +double val_flt
+        +string val_str
+        +vector~value~ val_arr
+        +vector~pair~val,val~~ val_obj
+        +func_handler val_func
+        +as_int() int64_t
+        +as_float() double
+        +as_string() string
+        +as_bool() bool
+        +invoke(func_args) value
+    }
+    note for jinja::value_t "common/jinja/value.h:106-172"
+
+    class jinja::string {
+        +vector~string_part~ parts
+        +str() string
+        +length() size_t
+        +mark_input()
+        +append() string
+        +uppercase() string
+        +lowercase() string
+        +strip() string
+    }
+    note for jinja::string "common/jinja/string.h:24-59"
+
+    class jinja::string_part {
+        +bool is_input
+        +string val
+    }
+    note for jinja::string_part "common/jinja/string.h:16-22"
+
+    %% ---------- Auto Parser ----------
+    namespace autoparser {
+        class generation_params {
+            +json messages
+            +json tools
+            +common_chat_tool_choice tool_choice
+            +json json_schema
+            +bool parallel_tool_calls
+            +common_reasoning_format reasoning_format
+            +bool stream
+            +string grammar
+            +bool add_generation_prompt
+            +common_chat_continuation continue_final_message
+            +common_chat_msg continue_msg
+            +bool enable_thinking
+            +time_point now
+            +json extra_context
+            +bool add_bos
+            +bool add_eos
+            +bool is_inference
+            +bool add_inference
+            +bool mark_input
+            +has_continuation() bool
+        }
+        note for generation_params "common/chat-auto-parser.h:54-78"
+
+        class autoparser {
+            +jinja::caps jinja_caps
+            +string user_start
+            +string assistant_start
+            +analyze_reasoning reasoning
+            +analyze_content content
+            +analyze_tools tools
+            +bool analysis_complete
+            +vector~string~ preserved_tokens
+            +detect_user_start_marker() string
+            +detect_assistant_start_marker() string
+            +analyze_template(tmpl) void
+            +build_parser(inputs, gen_prompt) common_peg_arena
+        }
+        note for autoparser "common/chat-auto-parser.h:379-406"
+
+        class analyze_base {
+            <<abstract>>
+            +build_parser(ctx) common_peg_parser*
+            #const common_chat_template* tmpl
+        }
+        note for analyze_base "common/chat-auto-parser.h:239-248"
+
+        class analyze_reasoning {
+            +reasoning_mode mode
+            +string start
+            +string end
+            +build_parser(ctx) common_peg_parser*
+            -compare_reasoning_presence()
+            -compare_thinking_enabled()
+            -compare_reasoning_scope()
+        }
+        note for analyze_reasoning "common/chat-auto-parser.h:254-275"
+
+        class analyze_content {
+            +content_mode mode
+            +string start
+            +string end
+            +bool requires_nonnull_content
+            +build_parser(ctx) common_peg_parser*
+            +is_always_wrapped() bool
+            +build_optional_wrapped(ctx) common_peg_parser
+        }
+        note for analyze_content "common/chat-auto-parser.h:281-296"
+
+        class analyze_tools {
+            +tool_format_analysis format
+            +tool_function_analysis function
+            +tool_arguments_analysis arguments
+            +tool_id_analysis call_id
+            +build_parser(ctx) common_peg_parser*
+            -analyze_tool_calls()
+            -analyze_tool_call_format()
+            -analyze_tool_call_format_json_native()
+            -analyze_tool_call_format_non_json()
+            -extract_function_markers()
+            -analyze_arguments()
+            -build_tool_parser_json_native() common_peg_parser
+            -build_tool_parser_tag_json() common_peg_parser
+            -build_tool_parser_tag_tagged() common_peg_parser
+        }
+        note for analyze_tools "common/chat-auto-parser.h:302-373"
+
+        class tool_format_analysis {
+            +tool_format mode
+            +string section_start
+            +string section_end
+            +string per_call_start
+            +string per_call_end
+            +bool fun_name_is_key
+            +bool tools_array_wrapped
+            +bool openai_wrapper_trigger
+            +string function_field
+            +string name_field
+            +string args_field
+            +string id_field
+            +string gen_id_field
+            +vector~string~ parameter_order
+        }
+        note for tool_format_analysis "common/chat-auto-parser.h:174-192"
+
+        class peg_generator {
+            +generate_parser(tmpl, inputs)$ common_chat_params
+            +generate_parser(tmpl, inputs, autoparser)$ common_chat_params
+        }
+        note for peg_generator "common/chat-auto-parser.h:412-421"
+    }
+
+    %% ---------- PEG Builder ----------
+    class common_chat_peg_builder {
+        +reasoning_block(p) common_peg_parser
+        +reasoning(p) common_peg_parser
+        +content(p) common_peg_parser
+        +tool(p) common_peg_parser
+        +tool_open(p) common_peg_parser
+        +tool_name(p) common_peg_parser
+        +tool_args(p) common_peg_parser
+        +tool_arg(p) common_peg_parser
+        +tool_arg_name(p) common_peg_parser
+        +tool_arg_value(p) common_peg_parser
+        +standard_json_tools() common_peg_parser
+        +standard_constructed_tools() common_peg_parser
+        +python_style_tool_calls() common_peg_parser
+    }
+    note for common_chat_peg_builder "common/chat-peg-parser.h:46-163"
+
+    class common_chat_peg_mapper {
+        +common_chat_msg& result
+        +from_ast(arena, result) void
+        +map(node) void
+        #normalize_container_value() string
+    }
+    note for common_chat_peg_mapper "common/chat-peg-parser.h:10-33"
+
+    class common_chat_peg_gemma4_mapper {
+        +from_ast(arena, result) void
+    }
+    note for common_chat_peg_gemma4_mapper "common/chat-peg-parser.h:35-41"
+
+    %% ---------- Relationships ----------
+    common_chat_msg *-- common_chat_tool_call : contains
+    common_chat_msg *-- common_chat_msg_content_part : contains
+
+    common_chat_msg_delimiters *-- common_chat_msg_delimiter : contains
+    common_chat_msg_spans *-- common_chat_msg_span : contains
+
+    common_chat_templates *-- common_chat_template : owns 2
+
+    common_chat_params --> common_chat_msg_delimiters : uses
+    common_chat_parser_params --> common_chat_params : derives from
+
+    common_chat_template --> jinja::program : compiled AST
+    common_chat_template --> jinja::caps : detected caps
+
+    jinja::program *-- jinja::statement : body
+    jinja::statement <|-- jinja::expression : extends
+    jinja::runtime --> jinja::context : uses
+    jinja::runtime --> jinja::program : executes
+    jinja::context *-- jinja::value_t : env
+    jinja::value_t *-- jinja::string : val_str
+
+    autoparser::autoparser *-- autoparser::analyze_reasoning : has
+    autoparser::autoparser *-- autoparser::analyze_content : has
+    autoparser::autoparser *-- autoparser::analyze_tools : has
+    autoparser::analyze_base <|-- autoparser::analyze_reasoning : extends
+    autoparser::analyze_base <|-- autoparser::analyze_content : extends
+    autoparser::analyze_base <|-- autoparser::analyze_tools : extends
+    autoparser::analyze_tools *-- autoparser::tool_format_analysis : has
+    autoparser::peg_generator --> autoparser::autoparser : consumes
+
+    common_chat_peg_builder --|> common_peg_parser_builder : extends
+    common_chat_peg_mapper <|-- common_chat_peg_gemma4_mapper : extends

@@ -1,0 +1,97 @@
+sequenceDiagram
+    participant App as Application
+    participant Ctx as llama_context
+    participant Decode as llama_decode
+    participant Logits as Logit Pipeline
+    participant Chain as llama_sampler_chain
+    participant S1 as Sampler (top-k)
+    participant S2 as Sampler (dist)
+    participant Pipe as common_sampler (optional)
+    participant Gram as Grammar Sampler
+
+    Note over App,Pipe: Standard sampling flow (CPU)
+
+    App->>Ctx: llama_sampler_chain_init()<br/>src/llama-sampler.cpp:792
+    App->>Chain: llama_sampler_chain_add(top-k)
+    App->>Chain: llama_sampler_chain_add(dist)
+    App->>Ctx: llama_sampler_sample(chain, ctx, idx)<br/>src/llama-sampler.cpp:806
+
+    Ctx->>Logits: get logits for idx<br/>llama_get_logits_ith() /<br/>llama_get_sampled_token_ith()
+
+    alt Backend already sampled
+        Logits-->>Ctx: sampled_token != LLAMA_TOKEN_NULL
+        Ctx-->>App: return sampled_token<br/>src/llama-sampler.cpp:813
+    else CPU fallback
+        Logits-->>Ctx: raw logits
+        Ctx->>Chain: llama_sampler_apply(chain, &cur_p)<br/>src/llama-sampler.cpp:864
+
+        loop For each sampler in chain<br/>src/llama-sampler.cpp:642-661
+            Chain->>S1: apply(&cur_p) — top-k truncation
+            alt is_backend == true
+                Note over Chain,S1: Skipped on CPU — runs in ggml graph
+            end
+            Chain->>S2: apply(&cur_p) — softmax + dist sampling
+            S2-->>Chain: cur_p.selected set
+        end
+
+        Chain-->>Ctx: cur_p.selected
+        Ctx->>Ctx: llama_sampler_accept(token)<br/>src/llama-sampler.cpp:870
+        Ctx-->>App: token ID
+    end
+
+    Note over App,Gram: common_sampler + grammar flow<br/>common/sampling.cpp:540-621
+
+    App->>Pipe: common_sampler_sample(gsmpl, ctx, idx)
+    Pipe->>Ctx: llama_synchronize()
+    Pipe->>Pipe: set_logits(ctx, idx)
+
+    alt Backend already sampled
+        Pipe-->>App: return backend token
+    else Apply reasoning budget
+        Pipe->>Pipe: llama_sampler_apply(rbudget, &cur_p)
+    end
+
+    alt grammar_first == true
+        Pipe->>Gram: llama_sampler_apply(grmr, &cur_p)<br/>apply grammar before chain
+    end
+
+    Pipe->>Chain: llama_sampler_apply(chain, &cur_p)<br/>standard sampling
+    Chain-->>Pipe: sampled ID
+
+    alt grammar_first == false && grammar active
+        Pipe->>Gram: validate single token against grammar<br/>llama_sampler_apply(grmr, &single_token)
+        Gram-->>Pipe: valid/invalid
+        alt Invalid — resample
+            Pipe->>Pipe: set_logits() again
+            Pipe->>Gram: llama_sampler_apply(grmr, &cur_p)<br/>full grammar mask
+            Pipe->>Chain: llama_sampler_apply(chain, &cur_p)<br/>resample
+            Chain-->>Pipe: resampled ID
+        end
+    end
+
+    Pipe-->>App: token ID
+
+    Note over App,Gram: Speculative decoding flow<br/>common/sampling.cpp:624-660
+
+    App->>Pipe: common_sampler_sample_and_accept_n(gsmpl, ctx, draft)
+    loop For each draft position<br/>until mismatch
+        Pipe->>Chain: sample token
+        Pipe->>Pipe: common_sampler_accept(token, true)
+        alt draft[i] != sampled token
+            App-->>Pipe: break — return accepted tokens
+        end
+    end
+    Pipe-->>App: vector~llama_token~ (accepted)
+
+    Note over App,Chain: Backend (GPU) sampling flow<br/>src/llama-context.cpp:112-129<br/>tests/test-backend-sampler.cpp
+
+    App->>Ctx: llama_init_from_model(model, params)<br/>with params.samplers = configs
+    Ctx->>Ctx: set_sampler(seq_id, chain)<br/>llama-context.cpp:123
+    Ctx->>S1: backend_init(buft)<br/>check op support
+    S1-->>Ctx: res (true/false)
+
+    App->>Ctx: llama_decode(batch)
+    Ctx->>Ctx: build ggml compute graph
+    Note over Ctx: backend_init called once<br/>backend_apply builds graph nodes
+    Note over Ctx: backend_set_input feeds runtime data<br/>backend_accept for accept hooks
+    Ctx-->>App: logits (potentially reduced by backend samplers)

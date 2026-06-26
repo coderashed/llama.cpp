@@ -1,0 +1,98 @@
+flowchart LR
+    subgraph CLI["CLI Entry Points (pyproject.toml:29-31)"]
+        A1["llama-convert-hf-to-gguf<br/>convert_hf_to_gguf.py:171"]
+        A2["llama-convert-lora-to-gguf<br/>convert_lora_to_gguf.py:main"]
+        A3["llama-convert-llama-ggml-to-gguf<br/>convert_llama_ggml_to_gguf.py:414"]
+    end
+
+    subgraph BASE["Converter Base (conversion/base.py)"]
+        B1["ModelBase (base.py:75)<br/>- hparams, gguf_writer, model_tensors<br/>- index_tensors, prepare_tensors, write"]
+        B2["TextModel (base.py:1100)<br/>- block_count, tensor_map, hf_arch<br/>- set_gguf_parameters, set_vocab"]
+        B3["MmprojModel (base.py:2306)<br/>- vision/audio encoder hparams"]
+        B4["LazyTorchTensor (base.py:2485)<br/>- lazy tensor proxies"]
+        B5["get_model_architecture (base.py:2603)"]
+    end
+
+    subgraph PER_ARCH["Per-Architecture Modules (conversion/*.py)"]
+        C1["llama.py:17-444<br/>LlamaModel, ArceeModel, Llama4Model, ..."]
+        C2["qwen.py:13-100<br/>QwenModel, Qwen2Model, Qwen2MoeModel"]
+        C3["gemma.py:16-947<br/>GemmaModel, Gemma2/3/4 Model"]
+        C4["deepseek.py<br/>DeepseekModel, DeepseekV2/V3"]
+        C5["Other modules (~80 total)"]
+    end
+
+    subgraph GGUF_PY["gguf-py Library (gguf-py/gguf/*.py)"]
+        D1["GGUFWriter (gguf_writer.py:65)<br/>- add_tensor, write_header/kv/tensors"]
+        D2["GGUFReader (gguf_reader.py:111)<br/>- read fields & tensors from GGUF"]
+        D3["LazyBase (lazy.py:77)<br/>- lazy tensor tree evaluation"]
+        D4["LazyNumpyTensor (lazy.py:206)"]
+        D5["quants (quants.py)<br/>- quantize, quant_shape_from_byte"]
+        D6["constants (constants.py)<br/>- GGMLQuantizationType, Keys, ..."]
+        D7["tensor_mapping (tensor_mapping.py)<br/>- TensorNameMap, get_tensor_name_map"]
+        D8["vocab (vocab.py)<br/>- MistralVocab, tokenizer handling"]
+        D9["utility (utility.py)<br/>- SafeTensorLocal, SafetensorRemote"]
+        D10["metadata (metadata.py)<br/>- Metadata loading & override"]
+    end
+
+    subgraph HF["Data Sources"]
+        E1["HF Hub (remote)<br/>huggingface_hub.snapshot_download<br/>convert_hf_to_gguf.py:191"]
+        E2["Local safetensors<br/>model.safetensors shards<br/>base.py:215"]
+        E3["Local PyTorch<br/>pytorch_model.bin shards<br/>base.py:218"]
+        E4["Legacy GGML/GGMF/GGJT<br/>binary formats<br/>convert_llama_ggml_to_gguf.py:146"]
+    end
+
+    subgraph CPP["C++ Side (round-trip support)"]
+        F1["llama_model_saver (llama-model-saver.h:12)<br/>- wraps gguf_context"]
+        F2["add_kv_from_model (llama-model-saver.cpp:145)<br/>- serialize hparams + vocab"]
+        F3["add_tensors_from_model (llama-model-saver.cpp:385)<br/>- iterate layers, write tensors"]
+        F4["save (llama-model-saver.cpp:414)<br/>- gguf_write_to_file"]
+    end
+
+    subgraph OUTPUT["GGUF Output"]
+        G1["Single GGUF file<br/>&lt;name&gt;.gguf"]
+        G2["Sharded GGUF files<br/>&lt;name&gt;-NNNNN-of-NNNNN.gguf"]
+    end
+
+    %% Data flow: HF Download -> Conversion -> GGUF
+    E1 -->|remote mode| A1
+    E2 --> A1
+    E3 --> A1
+    E4 --> A3
+
+    A1 --> B1
+    A1 --> B5
+    B5 -->|arch string| A1
+    A1 -->|get_model_class| PER_ARCH
+
+    B1 --> B2
+    B1 --> B3
+    B2 <-->|subclass| PER_ARCH
+    PER_ARCH -->|override set_gguf_parameters<br/>modify_tensors, set_vocab| B2
+
+    A2 -->|LoraModel subclass of TextModel| PER_ARCH
+
+    B1 --> D1
+    B4 --> D3
+
+    D1 --> D5
+    D1 --> D6
+    D1 --> D7
+    B2 --> D7
+    B1 --> D9
+    A1 --> D8
+    B1 --> D10
+
+    %% Write pipeline
+    A1 -->|model_instance.write()| B1
+    B1 -->|prepare_tensors| B1
+    B1 -->|gguf_writer.add_tensor| D1
+    B1 -->|gguf_writer.write_*| D1
+    D1 -->|writes binary| G1
+    D1 -->|split files| G2
+
+    %% C++ round-trip
+    G1 -->|load model in C++| F1
+    F1 --> F2
+    F1 --> F3
+    F1 --> F4
+    F4 -->|rewrites| G1

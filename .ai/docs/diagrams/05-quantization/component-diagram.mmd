@@ -1,0 +1,148 @@
+---
+title: Quantization Subsystems
+---
+
+graph TB
+    subgraph CLI["Quantization CLI"]
+        QCLI[tools/quantize/quantize.cpp:391]
+        QCLI -- "calls" --> QAPI
+    end
+
+    subgraph PublicAPI["Public API (include/llama.h)"]
+        QAPI["llama_model_quantize()<br>llama.h:639-642"]
+        QPARAMS["llama_model_quantize_params<br>llama.h:409-424"]
+        QDEF["llama_model_quantize_default_params()<br>llama.h:449"]
+    end
+
+    subgraph ExtAPI["Extension API (src/llama-ext.h)"]
+        XINIT["llama_quant_init()<br>llama-ext.h:24"]
+        XFREE["llama_quant_free()<br>llama-ext.h:28"]
+        XALLOW["llama_quant_tensor_allows_quantization()<br>llama-ext.h:48"]
+        XCOMPUTE["llama_quant_compute_types()<br>llama-ext.h:55"]
+        XMODEL["llama_quant_model_from_metadata()<br>llama-ext.h:45"]
+    end
+
+    subgraph QuantEngine["Quantization Engine (src/llama-quant.cpp)"]
+        QIMPL["llama_model_quantize_impl()<br>llama-quant.cpp:857"]
+        QSTATE["quantize_state_impl<br>llama-quant.cpp:163"]
+        TMETA["tensor_metadata<br>llama-quant.cpp:199"]
+        TCAT["tensor_category enum<br>llama-quant.cpp:25"]
+        TALLOW["tensor_allows_quantization()<br>llama-quant.cpp:288"]
+        TGETTYPE["llama_tensor_get_type()<br>llama-quant.cpp:661"]
+        TGETIMPL["llama_tensor_get_type_impl()<br>llama-quant.cpp:411"]
+        TFALLBACK["tensor_type_fallback()<br>llama-quant.cpp:362"]
+        TDEQ["llama_tensor_dequantize_impl()<br>llama-quant.cpp:212"]
+        TQ["llama_tensor_quantize_impl()<br>llama-quant.cpp:709"]
+        TIMATRIX["tensor_requires_imatrix()<br>llama-quant.cpp:767"]
+        FNAME["llama_ftype_get_default_type()<br>llama-quant.cpp:792"]
+    end
+
+    subgraph ModelLoader["Model Loader (src/llama-model-loader.cpp)"]
+        LOADER["llama_model_loader<br>llama-model-loader.h:31"]
+        LOADDATA["load_data_for()<br>llama-model-loader.cpp:1385"]
+        LOADALL["load_all_data()<br>llama-model-loader.cpp:1408"]
+        FNAME2["llama_model_ftype_name()<br>llama-model-loader.cpp:30"]
+    end
+
+    subgraph GGML_Quants["GGML Quant Kernels (ggml/src/ggml-quants.c)"]
+        Q_Q4_0["quantize_q4_0 / dequantize_q4_0"]
+        Q_Q4_1["quantize_q4_1 / dequantize_q4_1"]
+        Q_Q5_0["quantize_q5_0 / dequantize_q5_0"]
+        Q_Q5_1["quantize_q5_1 / dequantize_q5_1"]
+        Q_Q8_0["quantize_q8_0 / dequantize_q8_0"]
+    end
+
+    subgraph KQuants["K-Quant Kernels (ggml/src/ggml-quants.c)"]
+        Q_Q2_K["quantize_q2_K / dequantize_row_q2_K"]
+        Q_Q3_K["quantize_q3_K / dequantize_row_q3_K"]
+        Q_Q4_K["quantize_q4_K / dequantize_row_q4_K"]
+        Q_Q5_K["quantize_q5_K / dequantize_row_q5_K"]
+        Q_Q6_K["quantize_q6_K / dequantize_row_q6_K"]
+    end
+
+    subgraph IQ_Family["IQ-Family Kernels (ggml/src/ggml-quants.c)"]
+        Q_IQ1_S["quantize_iq1_s / dequantize_row_iq1_s"]
+        Q_IQ1_M["quantize_iq1_m / dequantize_row_iq1_m"]
+        Q_IQ2_XXS["quantize_iq2_xxs / dequantize_row_iq2_xxs"]
+        Q_IQ2_XS["quantize_iq2_xs / dequantize_row_iq2_xs"]
+        Q_IQ2_S["quantize_iq2_s / dequantize_row_iq2_s"]
+        Q_IQ3_XXS["quantize_iq3_xxs / dequantize_row_iq3_xxs"]
+        Q_IQ3_S["quantize_iq3_s / dequantize_row_iq3_s"]
+        Q_IQ4_NL["quantize_iq4_nl / dequantize_row_iq4_nl"]
+        Q_IQ4_XS["quantize_iq4_xs / dequantize_row_iq4_xs"]
+    end
+
+    subgraph GGML_Dispatch["GGML Quant Dispatch (ggml/src/ggml.c)"]
+        QCHUNK["ggml_quantize_chunk()<br>ggml.c:7706"]
+        QINIT["ggml_quantize_init()<br>ggml.c:7666"]
+        QFREE["ggml_quantize_free()<br>ggml.c:7684"]
+        QIMATRIX["ggml_quantize_requires_imatrix()<br>ggml.c:7698"]
+    end
+
+    subgraph TypeRegistry["Type Registry (ggml/include/ggml.h)"]
+        GGTYPE["ggml_type enum<br>ggml.h:389-433"]
+        TTRAITS["ggml_type_traits struct<br>ggml.h:2817-2825"]
+        GTYPE["ggml_ftype enum<br>ggml.h:448-476"]
+    end
+
+    subgraph BlockStructs["Block Structures (ggml/src/ggml-common.h)"]
+        B_Q2K["block_q2_K<br>ggml-common.h:288"]
+        B_Q3K["block_q3_K<br>ggml-common.h:305"]
+        B_Q4K["block_q4_K<br>ggml-common.h:317"]
+        B_Q5K["block_q5_K<br>ggml-common.h:334"]
+        B_Q6K["block_q6_K<br>ggml-common.h:352"]
+        B_IQ2XXS["block_iq2_xxs<br>ggml-common.h:371"]
+        B_IQ2XS["block_iq2_xs<br>ggml-common.h:378"]
+        B_IQ2S["block_iq2_s<br>ggml-common.h:387"]
+        B_IQ3XXS["block_iq3_xxs<br>ggml-common.h:397"]
+        B_IQ3S["block_iq3_s<br>ggml-common.h:405"]
+        B_IQ1S["block_iq1_s<br>ggml-common.h:415"]
+        B_IQ1M["block_iq1_m<br>ggml-common.h:423"]
+        B_IQ4NL["block_iq4_nl<br>ggml-common.h:438"]
+        B_IQ4XS["block_iq4_xs<br>ggml-common.h:444"]
+    end
+
+    subgraph TestSelection["Quant Type Selection Test"]
+        TSELECT[test-quant-type-selection.cpp]
+        TSELECT --> XINIT
+        TSELECT --> XCOMPUTE
+        TSELECT --> XFREE
+    end
+
+    subgraph KVQuant["KV Cache Quantization"]
+        KVCACHE[src/llama-kv-cache.cpp:1854]
+        KVCACHE --> TTRAITS
+        KVCACHE --> QCHUNK
+    end
+
+    QCLI --> QAPI
+    QAPI --> QIMPL
+    QIMPL --> QSTATE
+    QIMPL --> LOADER
+    QIMPL --> LOADDATA
+    QIMPL --> TALLOW
+    QIMPL --> TGETTYPE
+    TGETTYPE --> TGETIMPL
+    TGETTYPE --> TFALLBACK
+    QIMPL --> TDEQ
+    TDEQ --> TTRAITS
+    QIMPL --> TQ
+    TQ --> QCHUNK
+    QCHUNK --> QINIT
+    QCHUNK --> KQuants
+    QCHUNK --> IQ_Family
+    QCHUNK --> GGML_Quants
+    TGETIMPL --> FNAME
+    FNAME --> GGTYPE
+    TGETIMPL --> TIMATRIX
+    TGETIMPL --> TCAT
+    XCOMPUTE --> TGETTYPE
+    GGML_Quants --> TTRAITS
+    KQuants --> TTRAITS
+    IQ_Family --> TTRAITS
+    KQuants --> BlockStructs
+    IQ_Family --> BlockStructs
+    FNAME2 --> GGTYPE
+    GTYPE --> GGTYPE
+    TSELECT --> XCOMPUTE
+    KVCACHE --> QCHUNK

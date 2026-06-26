@@ -1,0 +1,66 @@
+%% sequence-diagram.mmd -- Graph dispatch flow through the scheduler
+%% Every step cites file:line from ggml-backend.cpp.
+
+sequenceDiagram
+    participant Caller as Caller (llama.cpp)
+    participant Sched as ggml_backend_sched
+    participant Split as split_graph logic
+    participant Alloc as alloc_splits
+    participant Compute as compute_splits
+    participant BackendN as Backend (CUDA/Metal/etc)
+    participant CPU as CPU Backend (last)
+
+    Caller->>Sched: ggml_backend_sched_graph_compute(graph)<br>ggml-backend.cpp:1883
+    activate Sched
+
+    Sched->>Sched: ggml_backend_sched_graph_compute_async(graph)<br>ggml-backend.cpp:1889
+    Note over Sched: If not allocated:<br>ggml_backend_sched_alloc_graph (1864)
+
+    Sched->>Split: ggml_backend_sched_split_graph(graph)<br>ggml-backend.cpp:1014
+    activate Split
+
+    Note over Split: Pass 1: assign backends to ops<br>with pre-allocated inputs (ggml-backend.cpp:1036-1069)
+    Note over Split: Pass 2: expand GPU backends<br>up and down through adjacent nodes (1072-1149)
+    Note over Split: Pass 3: upgrade to higher-prio<br>backends + set unassigned (1152-1211)
+    Note over Split: Pass 4: backfill remaining<br>unassigned from dst/view_src (1213-1243)
+    Note over Split: Pass 5: split graph into<br>contiguous backend ranges (1245-1487)
+
+    Split-->>Sched: splits + backend assignments
+    deactivate Split
+
+    Sched->>Alloc: ggml_backend_sched_alloc_splits()<br>ggml-backend.cpp:1489
+    activate Alloc
+
+    Note over Alloc: Compare current vs prev backend IDs<br>If unchanged and gallocr can reuse, skip
+    Note over Alloc: ggml_gallocr_reserve_n + alloc_graph<br>or reuse previous allocation (1509-1536)
+
+    Alloc-->>Sched: success/failure
+    deactivate Alloc
+
+    Sched->>Compute: ggml_backend_sched_compute_splits()<br>ggml-backend.cpp:1541
+    activate Compute
+
+    loop for each split (split_id = 0 .. n_splits-1)
+        Compute->>Compute: copy input tensors to split backend<br>ggml-backend.cpp:1554-1674
+        Note over Compute: MoE MUL_MAT_ID path: copies<br>only used experts (1576-1660)
+        Note over Compute: Tries async cpy_tensor_async<br>falls back to sync (1664-1672)
+
+        Compute->>BackendN: ggml_backend_graph_compute_async(split->graph)<br>ggml-backend.cpp:1678
+        activate BackendN
+        Note over BackendN: backend->iface.graph_compute()
+        BackendN-->>Compute: ggml_status
+        deactivate BackendN
+
+        alt if pipeline parallelism (n_copies > 1)
+            Compute->>BackendN: ggml_backend_event_record(event)<br>ggml-backend.cpp:1718-1720
+        end
+    end
+
+    Compute-->>Sched: GGML_STATUS_SUCCESS (1724)
+    deactivate Compute
+
+    Sched->>Sched: ggml_backend_sched_synchronize()<br>ggml-backend.cpp:1904
+    Note over Sched: synchronize all backends
+
+    Sched-->>Caller: ggml_status
+    deactivate Sched

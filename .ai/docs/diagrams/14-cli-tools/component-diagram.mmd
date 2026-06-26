@@ -1,0 +1,69 @@
+---
+title: Component Diagram — llama.cpp CLI Tools
+---
+
+flowchart TB
+    subgraph Tools["CLI Tools"]
+        CLI["llama-cli\n<code>tools/cli/cli.cpp:367</code>"]
+        PERP["llama-perplexity\n<code>tools/perplexity/perplexity.cpp:2011</code>"]
+        IMAT["llama-imatrix\n<code>tools/imatrix/imatrix.cpp:1058</code>"]
+        TOK["llama-tokenize\n<code>tools/tokenize/tokenize.cpp:187</code>"]
+        QUANT["llama-quantize\n<code>tools/quantize/quantize.cpp:391</code>"]
+        BENCH["llama-bench\n<code>tools/llama-bench/llama-bench.cpp:2169</code>"]
+        SPLIT["llama-gguf-split\n<code>tools/gguf-split/gguf-split.cpp:573</code>"]
+    end
+
+    subgraph SharedLibs["Shared Libraries"]
+        ARGP["common/arg.cpp\n<code>common_params_parse</code>\n<code>arg.cpp:1013</code>"]
+        COMMON["common/common.cpp\n<code>common_init_from_params</code>\n<code>common.cpp:1326</code>"]
+        SAMPLING["common/sampling.h\n<code>common_sampler</code>"]
+        LOG["common/log.h\n<code>common_log</code>"]
+        FIT["common/fit.h\n<code>common_fit_params</code>"]
+        DOWNLOAD["common/download.h\n<code>common_download*</code>"]
+        IMATRIX_LOADER["common/imatrix-loader.h\n<code>common_imatrix_load</code>"]
+        JINJA["common/jinja/*\n<code>jinja engine</code>"]
+    end
+
+    subgraph CoreLibs["Core C API"]
+        LLAMA_H["llama.h\n<code>llama_model_load_from_file</code>\n<code>llama_decode</code>\n<code>llama_model_quantize</code>"]
+        GGUF["gguf.h\n<code>gguf_init_from_file</code>\n<code>gguf_write_to_file</code>"]
+        GGML["ggml.h\n<code>ggml_backend*</code>"]
+    end
+
+    subgraph ServerInfr["Server Infrastructure"]
+        SVR_CTX["server-context.h\n<code>server_context</code>"]
+        SVR_TASK["server-task.h\n<code>server_task</code>"]
+    end
+
+    CLI --> SVR_CTX
+    SVR_CTX --> SVR_TASK
+    SVR_TASK --> LLAMA_H
+    SVR_TASK --> SAMPLING
+
+    CLI --> ARGP
+    CLI --> COMMON
+    CLI --> DOWNLOAD
+
+    PERP --> ARGP
+    PERP --> COMMON
+    PERP --> LLAMA_H
+
+    IMAT --> ARGP
+    IMAT --> COMMON
+    IMAT --> LLAMA_H
+    IMAT --> GGUF
+    IMAT --> IMATRIX_LOADER
+
+    TOK --> LLAMA_H
+    TOK --> COMMON
+
+    QUANT --> LLAMA_H
+    QUANT --> IMATRIX_LOADER
+    QUANT --> GGUF
+
+    BENCH --> LLAMA_H
+    BENCH --> GGML
+    BENCH --> DOWNLOAD
+
+    SPLIT --> GGUF
+    SPLIT --> GGML

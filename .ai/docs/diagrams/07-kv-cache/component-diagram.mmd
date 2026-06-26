@@ -1,0 +1,128 @@
+graph TB
+    subgraph "Public API (include/llama.h)"
+        API_MEM["llama_memory_* API<br/>src/llama-context.cpp:3827"]
+        API_DEC["llama_decode<br/>src/llama-context.cpp"]
+    end
+
+    subgraph "Memory Interface (src/llama-memory.h)"
+        M_I["llama_memory_i<br/>:73"]
+        M_CTX_I["llama_memory_context_i<br/>:51"]
+    end
+
+    subgraph "Basic KV Cache (src/llama-kv-cache.*)"
+        KV["llama_kv_cache<br/>.h:20 .cpp:80"]
+        KV_CTX["llama_kv_cache_context<br/>.h:320 .cpp:2489"]
+        KV_CELLS["llama_kv_cells<br/>src/llama-kv-cells.h:32"]
+        KV_EXT["llama_kv_cell_ext<br/>src/llama-kv-cells.h:13"]
+        KV_LAYER["kv_layer (private)<br/>.h:221"]
+    end
+
+    subgraph "DSA — Dynamic Stale Attention (src/llama-kv-cache-dsa.*)"
+        DSA["llama_kv_cache_dsa<br/>.h:15 .cpp:14"]
+        DSA_CTX["llama_kv_cache_dsa_context<br/>.h:83 .cpp:185"]
+        DSA_MLA["kv_mla: llama_kv_cache<br/>src/llama-kv-cache-dsa.cpp:32"]
+        DSA_LID["kv_lid: llama_kv_cache<br/>src/llama-kv-cache-dsa.cpp:49"]
+    end
+
+    subgraph "ISWA — Internal SWA (src/llama-kv-cache-iswa.*)"
+        ISWA["llama_kv_cache_iswa<br/>.h:14 .cpp:14"]
+        ISWA_CTX["llama_kv_cache_iswa_context<br/>.h:84 .cpp:266"]
+        ISWA_BASE["kv_base: llama_kv_cache<br/>src/llama-kv-cache-iswa.cpp:74"]
+        ISWA_SWA["kv_swa: llama_kv_cache<br/>src/llama-kv-cache-iswa.cpp:81"]
+    end
+
+    subgraph "Compute Graph Integration (src/llama-graph.*)"
+        INP_KV["llm_graph_input_attn_kv<br/>.h:305 .cpp:485"]
+        INP_K["llm_graph_input_attn_k<br/>.h:347"]
+        INP_DSA["llm_graph_input_attn_k_dsa<br/>.h:378"]
+        INP_ISWA["llm_graph_input_attn_kv_iswa<br/>.h:416"]
+        SHIFT_GRAPH["build_graph_shift<br/>src/llama-kv-cache.cpp:1905"]
+    end
+
+    subgraph "Model Layer (src/llama-model.cpp)"
+        MODEL["llama_model::create_memory<br/>:2026-2229"]
+        MEM_HYBRID["llama_memory_hybrid<br/>src/llama-memory-hybrid.cpp"]
+        MEM_RECUR["llama_memory_recurrent<br/>src/llama-memory-recurrent.cpp"]
+    end
+
+    subgraph "Tensor Backend"
+        GGML["ggml_backend_tensor_copy<br/>ggml_set_rows"]
+        SCHED["ggml_backend_sched<br/>graph scheduling"]
+    end
+
+    subgraph "SWA Types (src/llama-hparams.h)"
+        SWA_NONE["LLAMA_SWA_TYPE_NONE:19"]
+        SWA_STD["LLAMA_SWA_TYPE_STANDARD:20"]
+        SWA_CHUNK["LLAMA_SWA_TYPE_CHUNKED:21"]
+        SWA_SYM["LLAMA_SWA_TYPE_SYMMETRIC:22"]
+    end
+
+    %% Inheritance
+    M_I <|-- KV : implements
+    M_I <|-- DSA : implements
+    M_I <|-- ISWA : implements
+    M_CTX_I <|-- KV_CTX : implements
+    M_CTX_I <|-- DSA_CTX : implements
+    M_CTX_I <|-- ISWA_CTX : implements
+
+    %% Composition
+    KV --> KV_CELLS : owns n_stream sets
+    KV --> KV_EXT : per-cell metadata
+    KV --> KV_LAYER : owns per-layer tensors
+    KV_LAYER --> GGML : uses for copy ops
+
+    DSA --> DSA_MLA : owns
+    DSA --> DSA_LID : owns
+    DSA_CTX --> DSA_MLA : delegates
+    DSA_CTX --> DSA_LID : delegates
+
+    ISWA --> ISWA_BASE : owns
+    ISWA --> ISWA_SWA : owns
+    ISWA_CTX --> ISWA_BASE : delegates
+    ISWA_CTX --> ISWA_SWA : delegates
+
+    %% Graph integration
+    KV_CTX --> INP_KV : mctx ref
+    KV_CTX --> INP_K : mctx ref
+    DSA_CTX --> INP_DSA : mctx ref
+    ISWA_CTX --> INP_ISWA : mctx ref
+    KV --> SHIFT_GRAPH : builds shift graph
+
+    %% Sequence ops flow
+    API_MEM --> M_I : calls through
+    M_I --> KV : seq_rm/cp/add/div
+    M_I --> DSA : delegates to 2 caches
+    M_I --> ISWA : delegates to 2 caches
+
+    %% Creation flow
+    MODEL --> KV : creates for non-SWA non-hybrid
+    MODEL --> DSA : creates for DEEPSEEK32
+    MODEL --> ISWA : creates for SWA models
+    MODEL --> MEM_HYBRID : creates for hybrid arch
+    MODEL --> MEM_RECUR : creates for recurrent arch
+
+    %% Feature connections
+    KV --> SWA_NONE : uses for SWA config
+    KV --> SWA_STD : uses for SWA masking
+    KV --> SWA_CHUNK : uses for chunked SWA
+    KV --> SWA_SYM : uses for symmetric SWA
+
+    KV --> GGML : tensor copy/clear
+    KV --> SCHED : graph allocation/compute
+
+    KV -.- KV_CTX : creates for batch/update/full
+    DSA -.- DSA_CTX : creates for batch/update/full
+    ISWA -.- ISWA_CTX : creates for batch/update/full
+
+    style KV fill:#4a9,stroke:#333
+    style DSA fill:#49a,stroke:#333
+    style ISWA fill:#49a,stroke:#333
+    style KV_CTX fill:#7ab,stroke:#333
+    style DSA_CTX fill:#7ab,stroke:#333
+    style ISWA_CTX fill:#7ab,stroke:#333
+    style KV_CELLS fill:#8c8,stroke:#333
+    style KV_EXT fill:#8c8,stroke:#333
+    style MODEL fill:#f96,stroke:#333
+    style INP_KV fill:#fa8,stroke:#333
+    style INP_DSA fill:#fa8,stroke:#333
+    style INP_ISWA fill:#fa8,stroke:#333

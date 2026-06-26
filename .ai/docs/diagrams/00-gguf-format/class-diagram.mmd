@@ -1,0 +1,154 @@
+classDiagram
+    class gguf_kv {
+        +std::string key
+        +bool is_array
+        +enum gguf_type type
+        +std::vector~int8_t~ data
+        +std::vector~std::string~ data_string
+        +gguf_kv(key, T val)
+        +gguf_kv(key, vector~T~ val)
+        +gguf_kv(key, string val)
+        +get_key() const
+        +get_type() const
+        +get_ne() const
+        +get_val~T~(i) const
+        +cast(type)
+    }
+    %% file: ggml/src/gguf.cpp:131-210
+
+    class gguf_tensor_info {
+        +struct ggml_tensor t
+        +uint64_t offset
+    }
+    %% file: ggml/src/gguf.cpp:212-215
+
+    class gguf_context {
+        +uint32_t version
+        +vector~gguf_kv~ kv
+        +vector~gguf_tensor_info~ info
+        +size_t alignment
+        +size_t offset
+        +size_t size
+        +void* data
+    }
+    %% file: ggml/src/gguf.cpp:217-228
+
+    class gguf_writer_base {
+        +size_t written_bytes
+        +write(int8_t)*
+        +write(vector~int8_t~)*
+        +write_tensor_data(info, offset, alignment)*
+        +write~T~(val)
+        +write(bool val)
+        +write(string val)
+        +write(char* val)
+        +write(ggml_type val)
+        +write(gguf_type val)
+        +write(gguf_kv kv)
+        +write_tensor_meta(info)
+        +pad(alignment)
+    }
+    %% file: ggml/src/gguf.cpp:1415-1519
+
+    class gguf_writer_buf {
+        +vector~int8_t~& buf
+        +write(int8_t val)
+        +write(vector~int8_t~ val)
+        +write_tensor_data(info, offset, alignment)
+    }
+    %% file: ggml/src/gguf.cpp:1522-1557
+
+    class gguf_writer_file {
+        +FILE* file
+        +write(int8_t val)
+        +write(vector~int8_t~ val)
+        +write_tensor_data(info, offset, alignment)
+    }
+    %% file: ggml/src/gguf.cpp:1560-1601
+
+    class GGUFWriter {
+        +list~BufferedWriter~ fout
+        +Path path
+        +str arch
+        +GGUFEndian endianess
+        +int data_alignment
+        +list~dict~ tensors
+        +list~dict~ kv_data
+        +WriterState state
+        +__init__(path, arch, ...)
+        +open_output_file(path)
+        +write_header_to_file(path)
+        +write_kv_data_to_file()
+        +write_ti_data_to_file()
+        +write_tensors_to_file(progress)
+        +write_tensor_data(tensor)
+        +add_tensor(name, tensor, ...)
+        +add_tensor_info(name, shape, dtype, nbytes, ...)
+        +add_key_value(key, val, vtype, ...)
+        +add_uint8/int8/... (key, val)
+        +add_string(key, val)
+        +add_array(key, val)
+        +flush()
+        +close()
+    }
+    %% file: gguf-py/gguf/gguf_writer.py:65-106
+
+    class GGUFReader {
+        +char byte_order
+        +int alignment
+        +int data_offset
+        +OrderedDict fields
+        +list~ReaderTensor~ tensors
+        +numpy.memmap data
+        +__init__(path, mode)
+        +get_field(key)
+        +get_tensor(idx)
+        +_get(offset, dtype, ...)
+        +_push_field(field)
+        +_get_str(offset)
+        +_get_field_parts(offset, type)
+        +_build_fields(offs, count)
+        +_build_tensor_info(offs, count)
+        +_build_tensors(start, fields)
+    }
+    %% file: gguf-py/gguf/gguf_reader.py:111-185
+
+    class ReaderField {
+        +int offset
+        +str name
+        +list~NDArray~ parts
+        +list~int~ data
+        +list~GGUFValueType~ types
+        +contents(index)
+    }
+    %% file: gguf-py/gguf/gguf_reader.py:39-97
+
+    class ReaderTensor {
+        +str name
+        +GGMLQuantizationType tensor_type
+        +NDArray shape
+        +int n_elements
+        +int n_bytes
+        +int data_offset
+        +NDArray data
+        +ReaderField field
+    }
+    %% file: gguf-py/gguf/gguf_reader.py:100-108
+
+    class TensorInfo {
+        +Sequence~int~ shape
+        +GGMLQuantizationType dtype
+        +int nbytes
+        +ndarray tensor
+    }
+    %% file: gguf-py/gguf/gguf_writer.py:41-46
+
+    gguf_context *-- gguf_kv
+    gguf_context *-- gguf_tensor_info
+
+    gguf_writer_buf --|> gguf_writer_base : inherits
+    gguf_writer_file --|> gguf_writer_base : inherits
+
+    GGUFWriter *-- TensorInfo : uses
+    GGUFReader *-- ReaderField : owns
+    GGUFReader *-- ReaderTensor : owns

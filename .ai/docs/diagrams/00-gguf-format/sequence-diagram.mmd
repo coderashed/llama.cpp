@@ -1,0 +1,148 @@
+sequenceDiagram
+    participant User
+    participant gguf_init_from_file
+    participant gguf_init_from_file_ptr
+    participant gguf_init_from_reader
+    participant gguf_reader_callback
+    participant ctx as gguf_context
+    participant file as GGUF File
+
+    %% Reading sequence
+    rect rgb(200, 230, 255)
+    Note over User,file: READING PATH
+    User->>+gguf_init_from_file: gguf_init_from_file(fname, params)
+    %% ggml/src/gguf.cpp:979
+    gguf_init_from_file->>+gguf_init_from_file_ptr: fopen -> gguf_init_from_file_ptr(file, params)
+    %% ggml/src/gguf.cpp:928
+    gguf_init_from_file_ptr->>gguf_init_from_reader: gguf_init_from_reader(gr, params)
+    %% ggml/src/gguf.cpp:451 (via callback wrapper)
+    Note over gguf_init_from_reader: wraps file as gguf_reader_callback
+    %% ggml/src/gguf.cpp:910-926
+    end
+
+    rect rgb(230, 255, 230)
+    Note over gguf_init_from_reader,file: VALIDATE HEADER
+    gguf_init_from_reader->>file: read 4 bytes magic
+    file-->>gguf_init_from_reader: "GGUF"
+    Note over gguf_init_from_reader: validate magic at ggml/src/gguf.cpp:456-477
+    gguf_init_from_reader->>file: read version (uint32)
+    file-->>gguf_init_from_reader: version = 3
+    Note over gguf_init_from_reader: check version at ggml/src/gguf.cpp:484-510
+    gguf_init_from_reader->>file: read n_tensors (int64), n_kv (int64)
+    file-->>gguf_init_from_reader: counts
+    Note over gguf_init_from_reader: overflow check at ggml/src/gguf.cpp:515-535
+    end
+
+    rect rgb(255, 230, 230)
+    Note over gguf_init_from_reader,ctx: READ KV PAIRS
+    loop for each n_kv
+        gguf_init_from_reader->>file: read key string
+        file-->>gguf_init_from_reader: key
+        Note over gguf_init_from_reader: duplicate check at ggml/src/gguf.cpp:560-564
+        gguf_init_from_reader->>file: read type enum
+        file-->>gguf_init_from_reader: gguf_type
+        alt type == GGUF_TYPE_ARRAY
+            gguf_init_from_reader->>file: read array type + count
+            file-->>gguf_init_from_reader: element type, n
+        end
+        Note over gguf_init_from_reader: gguf_read_emplace_helper at ggml/src/gguf.cpp:580-599
+        gguf_init_from_reader->>ctx: push gguf_kv
+    end
+    Note over gguf_init_from_reader: read alignment at ggml/src/gguf.cpp:609-616
+    end
+
+    rect rgb(255, 255, 230)
+    Note over gguf_init_from_reader,ctx: READ TENSOR INFO
+    loop for each n_tensors
+        gguf_init_from_reader->>file: read tensor name string
+        file-->>gguf_init_from_reader: name
+        Note over gguf_init_from_reader: duplicate + length check at ggml/src/gguf.cpp:625-653
+        gguf_init_from_reader->>file: read n_dims + dims[]
+        file-->>gguf_init_from_reader: uint32 + int64[]
+        Note over gguf_init_from_reader: overflow check at ggml/src/gguf.cpp:657-691
+        gguf_init_from_reader->>file: read ggml_type
+        file-->>gguf_init_from_reader: tensor_type
+        Note over gguf_init_from_reader: validate type, strides at ggml/src/gguf.cpp:697-733
+        gguf_init_from_reader->>file: read data_offset
+        file-->>gguf_init_from_reader: uint64 offset
+        gguf_init_from_reader->>ctx: push gguf_tensor_info
+    end
+    end
+
+    rect rgb(230, 230, 255)
+    Note over gguf_init_from_reader,ctx: LOAD DATA BLOB
+    gguf_init_from_reader->>file: seek to aligned data
+    Note over gguf_init_from_reader: ggml/src/gguf.cpp:752-756
+    gguf_init_from_reader->>ctx: store offset, compute size
+    Note over gguf_init_from_reader: ggml/src/gguf.cpp:759-781
+    opt params.ctx != nullptr
+        gguf_init_from_reader->>ctx: create ggml_context
+        Note over gguf_init_from_reader: ggml/src/gguf.cpp:785-891
+        alt !params.no_alloc
+            gguf_init_from_reader->>file: read tensor data blob
+            file-->>gguf_init_from_reader: binary blob
+            Note over gguf_init_from_reader: ggml/src/gguf.cpp:837-858
+            gguf_init_from_reader->>ctx: create tensors, set data ptrs
+            Note over gguf_init_from_reader: ggml/src/gguf.cpp:862-880
+        else
+            Note over gguf_init_from_reader: create empty tensors, no data load
+            %% ggml/src/gguf.cpp:792-800
+        end
+    end
+    gguf_init_from_reader-->>gguf_init_from_file_ptr: return ctx
+    gguf_init_from_file_ptr-->>gguf_init_from_file: return ctx
+    gguf_init_from_file-->>User: gguf_context*
+    end
+
+    %% Writing sequence
+    rect rgb(255, 240, 220)
+    Note over User,file: WRITING PATH
+    User->>+gguf_write_to_file: gguf_write_to_file(ctx, fname, only_meta)
+    %% ggml/src/gguf.cpp:1660
+    gguf_write_to_file->>gguf_write_out: create gguf_writer_file + gguf_write_out(ctx, gw, only_meta)
+    %% ggml/src/gguf.cpp:1647-1658, 1603-1640
+    end
+
+    rect rgb(220, 255, 220)
+    Note over gguf_write_out,file: WRITE HEADER
+    gguf_write_out->>file: write "GGUF" magic (4 bytes)
+    %% ggml/src/gguf.cpp:1609-1612
+    gguf_write_out->>file: write version (uint32), n_tensors (int64), n_kv (int64)
+    %% ggml/src/gguf.cpp:1613-1615
+    end
+
+    rect rgb(255, 220, 220)
+    Note over gguf_write_out,file: WRITE KV PAIRS
+    loop for each n_kv
+        gguf_write_out->>file: write key string
+        gguf_write_out->>file: write type / array-type + count
+        gguf_write_out->>file: write value bytes
+        Note over gguf_write_out: dispatches to gguf_writer_base::write(gguf_kv)
+        %% ggml/src/gguf.cpp:1459-1498, invoked at ggml/src/gguf.cpp:1619
+    end
+    end
+
+    rect rgb(220, 220, 255)
+    Note over gguf_write_out,file: WRITE TENSOR METADATA
+    loop for each n_tensors
+        gguf_write_out->>file: write name, n_dims, dims[], type, offset
+        Note over gguf_write_out: gguf_writer_base::write_tensor_meta at ggml/src/gguf.cpp:1500-1511
+        %% invoked at ggml/src/gguf.cpp:1624
+    end
+    gguf_write_out->>file: pad to alignment
+    %% ggml/src/gguf.cpp:1628
+    end
+
+    rect rgb(230, 255, 230)
+    Note over gguf_write_out,file: WRITE TENSOR DATA
+    alt only_meta == false
+        loop for each n_tensors
+            gguf_write_out->>file: copy contiguous tensor bytes
+            Note over gguf_write_out: gguf_writer_file::write_tensor_data at ggml/src/gguf.cpp:1584-1601
+            %% or gguf_writer_buf at ggml/src/gguf.cpp:1539-1556
+            gguf_write_out->>file: pad to alignment
+        end
+    end
+    gguf_write_out-->>gguf_write_to_file: return
+    gguf_write_to_file-->>User: bool success
+    end

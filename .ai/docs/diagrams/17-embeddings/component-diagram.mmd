@@ -1,0 +1,60 @@
+flowchart TB
+    subgraph Public_API["Public API (include/llama.h)"]
+        PoolEnum["llama_pooling_type enum<br/>NONE, MEAN, CLS, LAST, RANK"]
+        SetEmbed["llama_set_embeddings()"]
+        GetEmbed["llama_get_embeddings()"]
+        GetEmbedIth["llama_get_embeddings_ith()"]
+        GetEmbedSeq["llama_get_embeddings_seq()"]
+        PoolType["llama_pooling_type()"]
+        EmbOut["llama_model_n_embd_out()"]
+    end
+
+    subgraph Context["Context (src/llama-context.cpp / .h)"]
+        CParams["cparams.embeddings (bool)"]
+        EmbBuffer["embd buffer_view (NONE)"]
+        EmbSeq["embd_seq map (pooled)"]
+        EmbNextn["embd_nextn buffer_view (MTP)"]
+        OutputId["output_ids[]"]
+        CopyTensor["copy t_embd from backend"]
+    end
+
+    subgraph Graph["Graph Pooling (src/llama-graph.cpp)"]
+        BuildPool["build_pooling()"]
+        InpMean["llm_graph_input_mean"]
+        InpCls["llm_graph_input_cls"]
+        ResultPooled["result_embd_pooled tensor"]
+    end
+
+    subgraph Model_Init["Model Loading (src/llama-model.cpp)"]
+        ReadPool["Read pooling_type from GGUF<br/>LLM_KV_POOLING_TYPE"]
+        AppendPool["Append build_pooling()<br/>to compute graph"]
+        AppendDense["Append dense output layers<br/>(sentence-transformers)"]
+    end
+
+    subgraph Harness["CLI Harness (examples/)"]
+        Embedding["embedding/embedding.cpp<br/>llama-embedding"]
+        Retrieval["retrieval/retrieval.cpp<br/>llama-retrieval"]
+    end
+
+    subgraph Server["Server (tools/server/)"]
+        Routes["POST /embeddings<br/>POST /v1/embeddings"]
+        SendEmb["send_embedding()"]
+        SendRerank["send_rerank()"]
+        TaskType["SERVER_TASK_TYPE_EMBEDDING"]
+        CapGate["--embeddings flag required"]
+    end
+
+    subgraph Common_Utils["Common Utilities (common/)"]
+        Norm["common_embd_normalize()"]
+        CosSim["common_embd_similarity_cos()"]
+    end
+
+    Public_API --> Context
+    Public_API --> Graph
+    Public_API --> Model_Init
+    Context --> Graph
+    Model_Init --> Graph
+    Harness --> Public_API
+    Server --> Public_API
+    Server --> Common_Utils
+    Harness --> Common_Utils

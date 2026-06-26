@@ -1,0 +1,58 @@
+---
+title: VarN Module / Function Diagram
+---
+classDiagram
+    class kvarn_variance_normalize {
+        +float* T           // [R][C] tile, modified in-place
+        +int R              // rows (e.g. 128)
+        +int C              // columns (e.g. 128)
+        +int K              // iterations (default 12)
+        +float c_min        // clamp lower bound (default -5.0)
+        +float c_max        // clamp upper bound (default +5.0)
+        +float* S_c         // [C] column scale output
+        +float* S_r         // [R] row scale output
+        +void kvarn_variance_normalize(...)
+    }
+    note "src/llama-kvarn.h: function declaration\nsrc/llama-kvarn.cpp: implementation"
+
+    class ImbMetric {
+        +const float* X     // tile [R][C]
+        +int R
+        +int C
+        +float compute()    // max(var_col)/min(var_col) * max(var_row)/min(var_row)
+    }
+    note "static helper; computes imbalance metric\nAlgorithm 1, step 18 (paper Appendix H)"
+
+    class kvarn_normalize_columns {
+        +float* T           // tile, modified in-place
+        +float* S_c         // [C] column scale output, accumulated
+        +int R, int C
+        +float c_min, float c_max
+        +void kvarn_normalize_columns(...)
+    }
+    note "src/llama-kvarn.cpp: static function\nFor each column j:\n  mean = log(mean(abs(T[:,j])))\n  clamp(mean, c_min, c_max)\n  T[:,j] -= mean\n  S_c[j] *= exp(mean)"
+
+    class kvarn_normalize_rows {
+        +float* T
+        +float* S_r
+        +int R, int C
+        +float c_min, float c_max
+        +void kvarn_normalize_rows(...)
+    }
+    note "src/llama-kvarn.cpp: static function\nFor each row i:\n  mean = log(mean(abs(T[i,:])))\n  clamp(mean, c_min, c_max)\n  T[i,:] -= mean\n  S_r[i] *= exp(mean)"
+
+    class BestStateTracking {
+        +float best_Imb
+        +std::vector<float> best_T   // copy of best tile state
+        +std::vector<float> best_S_c // copy of best column scales
+        +std::vector<float> best_S_r // copy of best row scales
+        +void save(float Imb, const float* T, const float* S_c, const float* S_r)
+        +bool is_better(float Imb)
+        +void restore(float* T, float* S_c, float* S_r)
+    }
+    note "Algorithm 1, steps 3, 19-24\nInline in kvarn_variance_normalize\nUses std::vector for RAII safety"
+
+    kvarn_variance_normalize *--> kvarn_normalize_columns : step 4a
+    kvarn_variance_normalize *--> kvarn_normalize_rows : step 4b
+    kvarn_variance_normalize *--> ImbMetric : step 4c
+    kvarn_variance_normalize *--> BestStateTracking : steps 3, 4d

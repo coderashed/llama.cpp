@@ -1,0 +1,84 @@
+graph TB
+    subgraph "GGML Core"
+        GGML[ggml_tensor / ggml_cgraph]
+        OPS[ggml-cpu ops.c<br/>AdamW/SGD kernels]
+        BACKEND[ggml_backend_sched]
+    end
+
+    subgraph "Optimizer Framework (ggml_opt)"
+        OPT_H[ggml-opt.h<br/>Public API]
+        OPT_CPP[ggml-opt.cpp<br/>Dataset, Build, Eval, Fit]
+        DATASET[ggml_opt_dataset<br/>Sharded dataset with permutation]
+        CTX[ggml_opt_context<br/>Graphs, gradients, momenta]
+        RESULT[ggml_opt_result<br/>Loss, predictions, accuracy]
+    end
+
+    subgraph "Llama Training API"
+        LLAMA_H[llama.h<br/>llama_opt_params, init, epoch]
+        LLAMA_CPP[llama-context.cpp<br/>opt_init, opt_epoch_iter, opt_epoch]
+        PARAM[llama_set_param<br/>Tag F32 tensors as trainable]
+    end
+
+    subgraph "Finetune Example"
+        FINETUNE[finetune.cpp<br/>CLI: llama-finetune]
+        TOKENIZE[common_opt_dataset_init<br/>Token -> dataset]
+        LR[lr_opt<br/>Half-life LR schedule]
+    end
+
+    subgraph "Importance Matrix"
+        IMATRIX_TOOL[imatrix.cpp<br/>llama-imatrix CLI]
+        IMATRIX_COL[IMatrixCollector<br/>Collect squared activations]
+        IMATRIX_LOAD[imatrix-loader.cpp<br/>GGUF/dat format loader]
+        IMATRIX_H[imatrix-loader.h<br/>common_imatrix structs]
+    end
+
+    subgraph "Quantization"
+        QUANT[llama-quant.cpp<br/>llama_model_quantize_params]
+        Q_IMAT[llama_model_imatrix_data<br/>Per-tensor importance data]
+        Q_CHUNK[ggml_quantize_chunk<br/>Importance-aware quantization]
+    end
+
+    subgraph "Memory Fitting"
+        FIT_H[fit.h<br/>common_fit_params]
+        FIT_CPP[fit.cpp<br/>Memory estimation + tuning]
+        FIT_TOOL[fit-params.cpp<br/>llama-fit-params CLI]
+    end
+
+    subgraph "Touch Points"
+        BENCH[llama-bench<br/>Fits params per scenario]
+        SERVER[server-context.cpp<br/>Auto-fits on startup]
+        COMMON[common.h<br/>fit_params=true by default]
+    end
+
+    OPT_H --> OPT_CPP
+    OPT_CPP --> GGML
+    OPT_CPP --> BACKEND
+    OPS --> BACKEND
+    OPT_CPP --> DATASET
+    OPT_CPP --> CTX
+    OPT_CPP --> RESULT
+
+    LLAMA_H --> LLAMA_CPP
+    LLAMA_CPP --> OPT_CPP
+    LLAMA_CPP --> PARAM
+    FINETUNE --> LLAMA_H
+    FINETUNE --> TOKENIZE
+    FINETUNE --> LR
+    TOKENIZE --> DATASET
+
+    IMATRIX_TOOL --> IMATRIX_COL
+    IMATRIX_COL --> GGML
+    IMATRIX_TOOL --> IMATRIX_LOAD
+    IMATRIX_LOAD --> IMATRIX_H
+
+    QUANT --> Q_IMAT
+    Q_IMAT --> IMATRIX_H
+    QUANT --> Q_CHUNK
+    Q_CHUNK --> GGML
+
+    FIT_H --> FIT_CPP
+    FIT_TOOL --> FIT_CPP
+    FIT_CPP --> LLAMA_CPP
+    BENCH --> FIT_H
+    SERVER --> FIT_H
+    COMMON --> FIT_H

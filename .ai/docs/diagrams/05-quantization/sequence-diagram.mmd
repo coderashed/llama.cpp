@@ -1,0 +1,78 @@
+---
+title: Quantization Data/Control Flow
+---
+
+sequenceDiagram
+    participant User as User / CLI
+    participant QEntry as llama_model_quantize<br>llama-quant.cpp:1309
+    participant QImpl as llama_model_quantize_impl<br>llama-quant.cpp:857
+    participant Loader as llama_model_loader<br>llama-model-loader.cpp:31
+    participant QState as quantize_state_impl<br>llama-quant.cpp:163
+    participant TypeSel as llama_tensor_get_type<br>llama-quant.cpp:661
+    participant TypeImpl as llama_tensor_get_type_impl<br>llama-quant.cpp:411
+    participant Dequant as llama_tensor_dequantize_impl<br>llama-quant.cpp:212
+    participant QuantKern as llama_tensor_quantize_impl<br>llama-quant.cpp:709
+    participant GGMLQ as ggml_quantize_chunk<br>ggml.c:7706
+    participant GGMLInit as ggml_quantize_init<br>ggml.c:7666
+    participant QKernel as quantize_q*_K / iq*<br>ggml-quants.c
+    participant GGUFO as gguf_context (output)<br>gguf.cpp
+    participant FileOut as Output GGUF File
+
+    User->>QEntry: llama_model_quantize(fname_inp, fname_out, params)
+    QEntry->>QImpl: delegate
+
+    QImpl->>Loader: llama_model_loader(file, mmap, ...)
+    QImpl->>QState: quantize_state_impl(model, params)
+
+    alt imatrix provided
+        QImpl->>QState: load and validate imatrix data (lines 903-921)
+    end
+
+    QImpl->>Loader: build tensor list (lines 964-991)
+
+    loop preliminary loop (lines 1021-1056)
+        QImpl->>TypeSel: llama_tensor_get_type(tensor, default_type, metadata)
+        TypeSel->>TypeImpl: llama_tensor_get_type_impl(category, ftype, ...)
+        TypeImpl-->>TypeSel: adjusted new_type
+
+        alt shape incompatible
+            TypeSel->>TypeSel: tensor_type_fallback() (line 699)
+        end
+
+        alt requires imatrix & not provided
+            TypeSel-->>QImpl: throw error
+        end
+
+        TypeSel-->>QImpl: target ggml_type
+        QImpl->>QImpl: metadata[i].target_type = result
+    end
+
+    loop main loop (lines 1115-1263)
+        QImpl->>Loader: load_data_for(tensor) (line 1134)
+
+        alt same type (no quantization)
+            QImpl->>QImpl: copy data directly (line 1174)
+        else quantize
+            QImpl->>Dequant: llama_tensor_dequantize_impl() (line 1218)
+            Dequant->>Dequant: ggml_type_traits.to_float() / f16->f32 (lines 232-273)
+            Dequant-->>QImpl: f32_data buffer
+
+            QImpl->>QuantKern: llama_tensor_quantize_impl() (line 1247)
+            QuantKern->>GGMLQ: ggml_quantize_chunk(type, f32_data, dst, ...)
+            GGMLQ->>GGMLInit: ggml_quantize_init(type) (noop if done, line 7723)
+            GGMLInit->>GGMLInit: iq2xs_init_impl/iq3xs_init_impl (lines 7670-7676)
+            GGMLQ->>QKernel: quantize_q4_K / quantize_iq2_xxs / etc. (lines 7730-7754)
+            QKernel-->>GGMLQ: compressed block data
+
+            QuantKern->>QuantKern: ggml_validate_row_data() (line 744)
+            QuantKern-->>QImpl: new_size
+        end
+
+        QImpl->>GGUFO: gguf_set_tensor_type(name, new_type) (line 1255)
+        QImpl->>GGUFO: gguf_set_tensor_data(name, new_data) (line 1257)
+        QImpl->>FileOut: fout.write(new_data, new_size) (line 1260)
+    end
+
+    QImpl->>FileOut: close_ofstream() (line 1266)
+    QImpl-->>QEntry: return
+    QEntry-->>User: 0 (success) or 1 (exception)

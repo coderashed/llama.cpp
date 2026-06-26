@@ -1,0 +1,170 @@
+classDiagram
+    class llama_model {
+        +llm_arch arch
+        +llama_hparams hparams
+        +llama_vocab vocab
+        +vector~llama_layer~ layers
+        +ggml_tensor* tok_embd
+        +ggml_tensor* output_norm
+        +ggml_tensor* output
+        +build_graph()
+        +load_stats()*
+        +load_hparams()*
+        +load_vocab()*
+        +load_tensors()*
+        +load_arch_hparams()*
+        +load_arch_tensors()*
+        +build_arch_graph()*
+    }
+    note for llama_model "src/llama-model.h:522-662"
+
+    class llama_model_base {
+        +LLM_TN tn
+        +llama_model_loader* ml
+        +create_tensor()
+        +create_tensor_qkv()
+        +create_tensor_gate_up_exps()
+        +load_stats()
+        +load_hparams()
+        +load_vocab()
+        +load_tensors()
+        +load_arch_hparams() = 0
+        +load_arch_tensors() = 0
+    }
+    note for llama_model_base "src/llama-model.h:668-707"
+
+    class llama_model_llama {
+        +load_arch_hparams()
+        +load_arch_tensors()
+        +build_arch_graph()
+    }
+    note for llama_model_llama "src/models/models.h:137"
+
+    class llama_model_falcon {
+        +load_arch_hparams()
+        +load_arch_tensors()
+        +build_arch_graph()
+    }
+    note for llama_model_falcon "src/models/models.h:228"
+
+    class llama_model_bert {
+        +load_arch_hparams()
+        +load_arch_tensors()
+        +build_arch_graph()
+    }
+    note for llama_model_bert "src/models/models.h:280"
+
+    class llama_model_t5 {
+        +load_arch_hparams()
+        +load_arch_tensors()
+        +build_arch_graph()
+    }
+    note for llama_model_t5 "src/models/models.h:1187"
+
+    class llama_model_mamba {
+        +load_arch_hparams()
+        +load_arch_tensors()
+        +build_arch_graph()
+    }
+    note for llama_model_mamba "src/models/models.h:864"
+
+    class llama_model_loader {
+        +gguf_context* metadata
+        +map~string,llama_tensor_weight~ weights_map
+        +LLM_KV llm_kv
+        +get_key()
+        +get_arr()
+        +create_tensor()
+        +init_mappings()
+        +load_all_data()
+        +get_arch()
+    }
+    note for llama_model_loader "src/llama-model-loader.h:31-207"
+
+    class llama_hparams {
+        +uint32_t n_ctx_train
+        +uint32_t n_embd
+        +uint32_t n_layer_all
+        +uint32_t n_expert
+        +array~uint32_t~ n_head_arr
+        +array~uint32_t~ n_ff_arr
+        +n_head()
+        +n_ff()
+        +n_layer()
+        +is_mla()
+        +is_swa()
+    }
+    note for llama_hparams "src/llama-hparams.h:39-398"
+
+    class llama_cparams {
+        +uint32_t n_ctx
+        +uint32_t n_batch
+        +uint32_t n_ubatch
+        +float rope_freq_base
+        +float rope_freq_scale
+    }
+    note for llama_cparams "src/llama-cparams.h:10-59"
+
+    class llama_layer {
+        +ggml_tensor* attn_norm
+        +ggml_tensor* wq
+        +ggml_tensor* wk
+        +ggml_tensor* wv
+        +ggml_tensor* wo
+        +ggml_tensor* ffn_gate
+        +ggml_tensor* ffn_down
+        +ggml_tensor* ffn_up
+        +ggml_tensor* ffn_gate_exps
+        +... ~160 ggml_tensor* fields
+    }
+    note for llama_layer "src/llama-model.h:223-507"
+
+    class llm_arch {
+        <<enumeration>>
+        LLM_ARCH_UNKNOWN
+        LLM_ARCH_LLAMA
+        LLM_ARCH_FALCON
+        LLM_ARCH_BERT
+        LLM_ARCH_T5
+        LLM_ARCH_MAMBA
+        ... 131 total
+    }
+    note for llm_arch "src/llama-arch.h:13-147"
+
+    class LLM_KV {
+        +llm_arch arch
+        +const char* suffix
+        +operator()(llm_kv kv)
+    }
+    note for LLM_KV "src/llama-arch.h:589-596"
+
+    class LLM_TN {
+        +llm_arch arch
+        +operator()(llm_tensor, suffix, bid, xid)
+    }
+    note for LLM_TN "src/llama-arch.h:631-643"
+
+    llama_model <|-- llama_model_base : inherits
+    llama_model_base <|-- llama_model_llama
+    llama_model_base <|-- llama_model_falcon
+    llama_model_base <|-- llama_model_bert
+    llama_model_base <|-- llama_model_t5
+    llama_model_base <|-- llama_model_mamba
+
+    llama_model *-- llama_hparams : hparams
+    llama_model *-- llama_layer : layers
+    llama_model *-- llama_model_loader : ml (via base)
+
+    llama_model_loader --> LLM_KV : llm_kv
+    llama_model_loader --> llm_arch : arch
+    llama_model_loader --> llama_hparams : reads hparams
+
+    llama_model_base --> LLM_TN : tn member
+    LLM_TN --> llm_arch : arch
+    LLM_KV --> llm_arch : arch
+
+    note "Factory dispatch at src/llama-model.cpp:38\nllama_model_mapping(arch, params)\nswitch -> new llama_model_<ARCH>(params)" as factory
+    llama_model ..> factory : created by
+    factory ..> llama_model_llama : case LLM_ARCH_LLAMA
+    factory ..> llama_model_falcon : case LLM_ARCH_FALCON
+    factory ..> llama_model_bert : case LLM_ARCH_BERT

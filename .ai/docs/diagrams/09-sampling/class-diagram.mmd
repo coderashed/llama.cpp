@@ -1,0 +1,162 @@
+classDiagram
+    class llama_sampler_i {
+        <<interface>>
+        +name(smpl) const char*
+        +accept(smpl, token) void
+        +apply(smpl, cur_p) void
+        +reset(smpl) void
+        +clone(smpl) llama_sampler*
+        +free(smpl) void
+        +backend_init(smpl, buft) bool
+        +backend_accept(smpl, ctx, gf, selected_token) void
+        +backend_apply(smpl, ctx, gf, data) void
+        +backend_set_input(smpl) void
+    }
+
+    class llama_sampler {
+        +iface: llama_sampler_i*
+        +ctx: llama_sampler_context_t
+    }
+
+    class llama_sampler_chain {
+        +params: llama_sampler_chain_params
+        +is_init: bool
+        +samplers: vector~info~
+        +cur: vector~llama_token_data~
+        +t_sample_us: int64_t
+        +n_sample: int32_t
+    }
+    note for llama_sampler_chain "src/llama-sampler.h:12-34"
+
+    class info {
+        +is_backend: bool
+        +ptr: llama_sampler*
+    }
+
+    class llama_sampler_backend {
+        <<base class>>
+        #name: string
+        #name_ext: string
+        #is_init: bool
+        #support: bool
+        +get_name() const char*
+        +init(support) void
+    }
+    note for llama_sampler_backend "src/llama-sampler.cpp:526-556"
+
+    llama_sampler_chain o-- info
+    llama_sampler *-- llama_sampler_i
+    llama_sampler_chain ..|> llama_sampler_i : implements
+
+    class llama_sampler_greedy {
+        +init_greedy()
+    }
+    class llama_sampler_dist {
+        +seed: uint32_t
+        +rng: mt19937
+        +inp_uniform: ggml_tensor*
+    }
+    class llama_sampler_top_k {
+        +k: int32_t
+    }
+    class llama_sampler_top_p {
+        +p: float
+        +min_keep: size_t
+        +buf_sort: vector
+    }
+    class llama_sampler_min_p {
+        +p: float
+        +min_keep: size_t
+    }
+    class llama_sampler_temp {
+        +temp: float
+    }
+    class llama_sampler_temp_ext {
+        +temp, delta, exponent: float
+    }
+    class llama_sampler_mirostat {
+        +n_vocab, tau, eta, m, mu
+        +rng: mt19937
+    }
+    class llama_sampler_mirostat_v2 {
+        +tau, eta, mu
+        +rng: mt19937
+    }
+    class llama_sampler_typical {
+        +p: float
+        +min_keep: size_t
+    }
+    class llama_sampler_xtc {
+        +probability, threshold: float
+        +min_keep: size_t
+        +rng: mt19937
+    }
+    class llama_sampler_penalties {
+        +penalty_last_n: int32_t
+        +penalty_repeat, penalty_freq, penalty_present: float
+        +prev: ring_buffer
+        +token_count: unordered_map
+    }
+    class llama_sampler_dry {
+        +dry_multiplier, dry_base: float
+        +dry_allowed_length, dry_penalty_last_n: int32_t
+        +dry_processed_breakers: unordered_multimap
+        +last_tokens: ring_buffer
+    }
+    class llama_sampler_grammar {
+        +vocab: const llama_vocab*
+        +grammar_str, grammar_root: string
+        +grammar: llama_grammar*
+    }
+    class llama_sampler_logit_bias {
+        +n_vocab: int32_t
+        +logit_bias: vector~llama_logit_bias~
+        +inp_logit_bias: ggml_tensor*
+        +inp_logit_idxs: ggml_tensor*
+    }
+    class llama_sampler_infill {
+        +vocab: const llama_vocab*
+        +buf0, buf1: vector~char~
+    }
+    class llama_sampler_adaptive_p {
+        +target, decay: float
+        +seed: uint32_t
+        +rng: mt19937
+        +weighted_sum, total_weight: float
+        +original_probs: vector~float~
+    }
+    class llama_sampler_top_n_sigma {
+        +n: float
+    }
+
+    llama_sampler_backend <|-- llama_sampler_greedy : extends
+    llama_sampler_backend <|-- llama_sampler_dist
+    llama_sampler_backend <|-- llama_sampler_top_k
+    llama_sampler_backend <|-- llama_sampler_top_p
+    llama_sampler_backend <|-- llama_sampler_min_p
+    llama_sampler_backend <|-- llama_sampler_temp
+    llama_sampler_backend <|-- llama_sampler_temp_ext
+    llama_sampler_backend <|-- llama_sampler_logit_bias
+
+    llama_sampler_typical --|> llama_sampler_i : has vtable
+    llama_sampler_mirostat --|> llama_sampler_i
+    llama_sampler_mirostat_v2 --|> llama_sampler_i
+    llama_sampler_xtc --|> llama_sampler_i
+    llama_sampler_penalties --|> llama_sampler_i
+    llama_sampler_dry --|> llama_sampler_i
+    llama_sampler_grammar --|> llama_sampler_i
+    llama_sampler_infill --|> llama_sampler_i
+    llama_sampler_adaptive_p --|> llama_sampler_i
+    llama_sampler_top_n_sigma --|> llama_sampler_i
+
+    class common_sampler {
+        +params: common_params_sampling
+        +grmr: llama_sampler*
+        +rbudget: llama_sampler*
+        +chain: llama_sampler*
+        +prev: ring_buffer~llama_token~
+        +cur: vector~llama_token_data~
+        +cur_p: llama_token_data_array
+        +t_total_us: int64_t
+    }
+    note for common_sampler "common/sampling.cpp:111-169"

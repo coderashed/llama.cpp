@@ -1,0 +1,172 @@
+classDiagram
+    class mtmd_context {
+        +ctx_v: clip_ctx*
+        +ctx_a: clip_ctx*
+        +out_embd: vector~float~
+        +n_embd_text: int
+        +vocab: llama_vocab*
+        +media_marker: string
+        +img_beg/img_end: string
+        +aud_beg/aud_end: string
+        +image_preproc: unique_ptr~mtmd_image_preprocessor~
+        +audio_preproc: unique_ptr~mtmd_audio_preprocessor~
+        +slice_tmpl: mtmd_slice_tmpl
+        +batch_max_tokens: int32
+        +init_from_file(mmproj, text_model, params)
+        +~mtmd_context()
+    }
+    note for mtmd_context "mtmd.cpp:260-797"
+
+    class clip_ctx {
+        +model: clip_model
+        +backend: ggml_backend_t
+        +sched: ggml_backend_sched_ptr
+        +flash_attn_type: clip_flash_attn_type
+        +support_batch: bool
+        +proj_type()
+    }
+    note for clip_ctx "clip.cpp:146-238"
+
+    class clip_model {
+        +modality: clip_modality
+        +proj_type: projector_type
+        +hparams: clip_hparams
+        +class_embedding: ggml_tensor*
+        +patch_embeddings_0/1: ggml_tensor*
+        +position_embeddings: ggml_tensor*
+        +layers: vector~clip_layer~
+        +mm_fc_w/b: ggml_tensor*
+        +mm_ffn_up/gate/down: ggml_tensor*
+        +mm_input_proj_w: ggml_tensor*
+    }
+    note for clip_model "clip-model.h:352-631"
+
+    class clip_hparams {
+        +image_size: int32
+        +patch_size: int32
+        +n_embd: int32
+        +n_head: int32
+        +n_layer: int32
+        +projection_dim: int32
+        +n_merge: int32
+        +image_longest_edge: int32
+        +image_min_pixels: int32
+        +image_mean: float[3]
+        +image_std: float[3]
+        +ffn_op: ffn_op_type
+        +mm_patch_merge_type: patch_merge_type
+        +rope_theta: float
+    }
+    note for clip_hparams "clip-model.h:49-171"
+
+    class clip_layer {
+        +ln_1_w/b: ggml_tensor*
+        +k_w/b, q_w/b, v_w/b: ggml_tensor*
+        +qkv_w/b: ggml_tensor*
+        +o_w/b: ggml_tensor*
+        +ff_up/gate/down: ggml_tensor*
+        +ln_2_w/b: ggml_tensor*
+        +deepstack_norm_w/b: ggml_tensor*
+        +deepstack_fc1/fc2: ggml_tensor*
+    }
+    note for clip_layer "clip-model.h:173-276"
+
+    class clip_graph {
+        <<abstract>>
+        +model: clip_model
+        +hparams: clip_hparams
+        +img: clip_image_f32
+        +n_patches: int
+        +n_embd: int
+        +n_head: int
+        +d_head: int
+        +build()* ggml_cgraph*
+        +build_inp() ggml_tensor*
+        +build_vit() ggml_tensor*
+        +build_ffn() ggml_tensor*
+        +build_attn() ggml_tensor*
+        +build_patch_merge_permute() ggml_tensor*
+    }
+    note for clip_graph "clip-graph.h:18-136"
+
+    class mtmd_image_preprocessor {
+        <<abstract>>
+        +hparams: clip_hparams
+        +preprocess(img) mtmd_image_preproc_out*
+    }
+    note for mtmd_image_preprocessor "mtmd-image.h:30-37"
+
+    class mtmd_input_chunk {
+        +type: mtmd_input_chunk_type
+        +tokens_text: vector~llama_token~
+        +tokens_image: mtmd_image_tokens_ptr
+        +tokens_audio: mtmd_audio_tokens_ptr
+        +can_batch_with(other) bool
+    }
+    note for mtmd_input_chunk "mtmd.cpp:167-195"
+
+    class mtmd_image_tokens {
+        +nx: uint32
+        +ny: uint32
+        +pos: mtmd_pos_type
+        +n_temporal_merge: uint32
+        +batch_f32: clip_image_f32_batch
+        +id: string
+        +n_tokens() uint32
+    }
+    note for mtmd_image_tokens "mtmd.cpp:88-139"
+
+    class mtmd_bitmap {
+        +nx: uint32
+        +ny: uint32
+        +id: string
+        +is_audio: bool
+        +can_merge_with(other) bool
+    }
+    note for mtmd_bitmap "mtmd.cpp:32-79"
+
+    class mtmd_batch {
+        +ctx: mtmd_context*
+        +entries: vector~mtmd_input_chunk*~
+        +n_tokens() int32
+    }
+    note for mtmd_batch "mtmd.cpp:201-213"
+
+    mtmd_context *-- clip_ctx : ctx_v, ctx_a
+    mtmd_context --> mtmd_image_preprocessor : image_preproc
+    mtmd_context --> mtmd_image_tokens : out_embd
+    clip_ctx --> clip_model : model
+    clip_model --> clip_hparams : hparams
+    clip_model *-- clip_layer : layers
+    clip_graph --> clip_model : model
+    clip_graph --> clip_hparams : hparams
+    clip_graph --> clip_image_f32 : img
+    clip_graph <|-- clip_graph_llava : LLaVA
+    clip_graph <|-- clip_graph_qwen2vl : Qwen2VL
+    clip_graph <|-- clip_graph_qwen3vl : Qwen3VL
+    clip_graph <|-- clip_graph_internvl : InternVL
+    clip_graph <|-- clip_graph_minicpmv : MiniCPM-V
+    clip_graph <|-- clip_graph_siglip : SigLIP/Gemma3
+    clip_graph <|-- clip_graph_pixtral : Pixtral
+    clip_graph <|-- clip_graph_llama4 : Llama4
+    clip_graph <|-- clip_graph_hunyuanvl : HunyuanVL
+    clip_graph <|-- clip_graph_gemma4v : Gemma4
+    clip_graph <|-- clip_graph_granite4_vision : Granite4
+    clip_qwen2vl <|-- clip_graph_qwen3vl
+    mtmd_image_preprocessor <|-- mtmd_image_preprocessor_fixed_size
+    mtmd_image_preprocessor <|-- mtmd_image_preprocessor_dyn_size
+    mtmd_image_preprocessor <|-- mtmd_image_preprocessor_longest_edge
+    mtmd_image_preprocessor <|-- mtmd_image_preprocessor_llava_uhd
+    mtmd_image_preprocessor_llava_uhd <|-- mtmd_image_preprocessor_idefics3
+    mtmd_image_preprocessor_llava_uhd <|-- mtmd_image_preprocessor_internvl
+    mtmd_image_preprocessor_llava_uhd <|-- mtmd_image_preprocessor_lfm2
+    mtmd_image_preprocessor_llava_uhd <|-- mtmd_image_preprocessor_step3vl
+    mtmd_image_preprocessor_llava_uhd <|-- mtmd_image_preprocessor_granite
+    mtmd_image_preprocessor <|-- mtmd_image_preprocessor_deepseekocr
+    mtmd_image_preprocessor <|-- mtmd_image_preprocessor_deepseekocr2
+    mtmd_image_preprocessor <|-- mtmd_image_preprocessor_youtuvl
+    mtmd_input_chunk --> mtmd_image_tokens : tokens_image
+    mtmd_input_chunk --> mtmd_audio_tokens : tokens_audio
+    mtmd_input_chunks *-- mtmd_input_chunk : entries
+    mtmd_batch --> mtmd_input_chunk : entries
+    mtmd_image_tokens --> clip_image_f32_batch : batch_f32

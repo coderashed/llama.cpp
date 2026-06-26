@@ -1,0 +1,60 @@
+---
+title: VarN Iteration Loop Sequence
+---
+sequenceDiagram
+    participant Caller as Integration Point
+    participant VN as kvarn_variance_normalize
+    participant CN as kvarn_normalize_columns
+    participant RN as kvarn_normalize_rows
+    participant IM as kvarn_imb_metric
+    participant BT as BestStateTracking
+
+    Caller->>VN: kvarn_variance_normalize(T, R, C, K, c_min, c_max, S_c, S_r)
+
+    Note over VN: -- Initialization (Algorithm 1 steps 1-3) --
+    VN->>VN: S_c[:] = 1.0, S_r[:] = 1.0
+    VN->>IM: Imb(T)
+    IM-->>VN: best_Imb
+    VN->>BT: best_T = copy(T), best_S_c = copy(S_c), best_S_r = copy(S_r)
+
+    Note over VN: -- Main iteration loop (steps 4-24) --
+    loop for iter = 0 to K-1
+        Note over VN: -- Step 4a: Column Normalize --
+    VN->>CN: kvarn_normalize_columns(T, S_c, R, C, c_min, c_max)
+    CN->>CN: for j in 0..C-1:
+    CN->>CN:   mean = 0
+    CN->>CN:   for i in 0..R-1: mean += abs(T[i][j])
+    CN->>CN:   mean = log(mean / R)
+    CN->>CN:   mean = clamp(mean, c_min, c_max)
+    CN->>CN:   for i in 0..R-1: T[i][j] -= mean
+    CN->>CN:   S_c[j] *= exp(mean)
+        CN-->>VN: done
+
+        Note over VN: -- Step 4b: Row Normalize --
+        VN->>RN: kvarn_normalize_rows(T, S_r, R, C, c_min, c_max)
+        RN->>RN: for i in 0..R-1:
+        RN->>RN:   mean = 0
+        RN->>RN:   for j in 0..C-1: mean += abs(T[i][j])
+        RN->>RN:   mean = log(mean / C)
+        RN->>RN:   mean = clamp(mean, c_min, c_max)
+        RN->>RN:   for j in 0..C-1: T[i][j] -= mean
+        RN->>RN:   S_r[i] *= exp(mean)
+        RN-->>VN: done
+
+        Note over VN: -- Step 4c: Compute Imb() --
+        VN->>IM: kvarn_imb_metric(T, R, C)
+        IM->>IM: col_vars[j] = var(T[*][j]) for j in 0..C-1
+        IM->>IM: row_vars[i] = var(T[i][*]) for i in 0..R-1
+        IM->>IM: Imb = (max(col_vars)/min(col_vars)) * (max(row_vars)/min(row_vars))
+        IM-->>VN: Imb
+
+        Note over VN: -- Step 4d: Best-state tracking --
+        VN->>BT: if curr_Imb < best_Imb:
+        BT-->>VN: memcpy into best_T/best_S_c/best_S_r
+    end
+
+    Note over VN: -- Step 5: Restore best state --
+    VN->>BT: memcpy(T, best_T); memcpy(S_c, best_S_c); memcpy(S_r, best_S_r)
+    BT-->>VN: T[:] = best_T, S_c[:] = best_S_c, S_r[:] = best_S_r
+
+    VN-->>Caller: return (T modified in-place, S_c, S_r filled)

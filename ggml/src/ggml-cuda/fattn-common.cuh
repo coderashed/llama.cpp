@@ -617,6 +617,91 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+// Q2_KVARN dequantize_V: unpacks 2-bit values from block_q2_kvarn
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_q2_kvarn(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_q2_kvarn * x = (const block_q2_kvarn *) vx;
+
+    const int64_t ib  = i0 / QK2_KVARN;
+    const int     iqs = i0 % QK2_KVARN;
+
+    const float d  = __half2float(x[ib].d);
+    const float s1 = __half2float(x[ib].s1);
+    const float s2 = __half2float(x[ib].s2);
+    const float scale = s1 * s2;
+
+    static_assert(ne == 2 || ne == 4, "bad ne");
+
+    float vals[ne];
+    for (int l = 0; l < ne; ++l) {
+        const int idx = iqs + l;
+        const int byte_idx = idx / 4;
+        const int bit_shift = (idx % 4) * 2;
+        const uint8_t byte = x[ib].qs[byte_idx];
+        vals[l] = ((float)((byte >> bit_shift) & 0x03) + d) * scale;
+    }
+
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, half>) {
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            ((half2 *) dst)[l0/2] = make_half2(vals[l0 + 0], vals[l0 + 1]);
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, float>) {
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            ((float *) dst)[l] = vals[l];
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
+// Q2_KVARN vec_dot_KQ: dot product of Q2_KVARN K with Q8_1 Q
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q2_kvarn(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_q2_kvarn * K_q2_kvarn = (const block_q2_kvarn *) K_c;
+    GGML_UNUSED(Q_v);
+
+    // Each k_KQ covers sizeof(int)=4 elements. QK2_KVARN/sizeof(int) k_KQ values per block.
+    constexpr int stride = QK2_KVARN / (int)sizeof(int);
+
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        const int ib       = k_KQ / stride;   // block index
+        const int byte_idx = k_KQ % stride;   // byte within block (4 2-bit values per byte)
+
+        const float d  = __half2float(K_q2_kvarn[ib].d);
+        const float s1 = __half2float(K_q2_kvarn[ib].s1);
+        const float s2 = __half2float(K_q2_kvarn[ib].s2);
+        const float scale = s1 * s2;
+
+        const uint8_t qbyte = K_q2_kvarn[ib].qs[byte_idx];
+
+        // Unpack 4 Q8_1 quantized Q values for this position
+        const int8_t * q = (const int8_t *) &Q_q8[k_KQ_0/nthreads];
+        const float Q_d = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads].x;
+
+        // Dot 4 2-bit K values with 4 Q8 values
+        float dot = 0.0f;
+        for (int b = 0; b < 4; b++) {
+            const float kval = ((float)((qbyte >> (b * 2)) & 0x03) + d) * scale;
+            dot += kval * (float)q[b];
+        }
+        sum += Q_d * dot;
+    }
+
+    return sum;
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -631,6 +716,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q5_1<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_Q8_0) {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_Q2_KVARN) {
+        return vec_dot_fattn_vec_KQ_q2_kvarn<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
     } else {
@@ -653,6 +740,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q5_1<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_Q8_0) {
         return dequantize_V_q8_0<T, ne>;
+    } else if constexpr (type_V == GGML_TYPE_Q2_KVARN) {
+        return dequantize_V_q2_kvarn<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
     } else {

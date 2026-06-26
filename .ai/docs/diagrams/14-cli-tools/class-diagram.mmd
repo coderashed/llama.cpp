@@ -1,0 +1,155 @@
+---
+title: Class / Struct Diagram — CLI Tools Data Types
+---
+
+classDiagram
+
+    class common_params {
+        +int32_t n_predict
+        +int32_t n_ctx
+        +int32_t n_batch
+        +common_params_sampling sampling
+        +common_params_speculative speculative
+        +common_params_model model
+        +common_params_model mmproj
+        +common_cpu_params cpuparams
+        +bool interactive
+        +bool use_color
+        +string prompt
+        +vector~string~ antiprompt
+        +vector~ggml_backend_dev_t~ devices
+        +vector~llama_model_tensor_buft_override~ tensor_buft_overrides
+        +llama_progress_callback load_progress_callback
+        +<code>common/common.h:440-715</code>
+    }
+
+    class common_params_sampling {
+        +uint32_t seed
+        +int32_t top_k
+        +float top_p
+        +float min_p
+        +float temp
+        +vector~common_sampler_type~ samplers
+        +common_grammar grammar
+        +vector~llama_logit_bias~ logit_bias
+        +<code>common/common.h:211-291</code>
+    }
+
+    class common_params_speculative {
+        +vector~common_speculative_type~ types
+        +common_params_speculative_draft draft
+        +<code>common/common.h:361-385</code>
+    }
+
+    class common_params_model {
+        +string path
+        +string url
+        +string hf_repo
+        +string hf_file
+        +<code>common/common.h:293-313</code>
+    }
+
+    class common_cpu_params {
+        +int n_threads
+        +bool cpumask[GGML_MAX_N_THREADS]
+        +ggml_sched_priority priority
+        +<code>common/common.h:58-65</code>
+    }
+
+    class common_arg {
+        +set~llama_example~ examples
+        +vector~const char*~ args
+        +vector~const char*~ args_neg
+        +const char* value_hint
+        +string help
+        +bool is_sampling
+        +void (*handler_void)(common_params&)
+        +void (*handler_string)(common_params&, string)
+        +void (*handler_int)(common_params&, int)
+        +void (*handler_bool)(common_params&, bool)
+        +common_arg& set_examples(...)
+        +common_arg& set_env(...)
+        +<code>common/arg.h:21-106</code>
+    }
+
+    class common_params_context {
+        +llama_example ex
+        +common_params& params
+        +vector~common_arg~ options
+        +void (*print_usage)(int, char**)
+        +<code>common/arg.h:114-120</code>
+    }
+
+    class common_init_result {
+        +llama_model* model()
+        +llama_context* context()
+        +common_sampler* sampler(llama_seq_id)
+        +<code>common/common.h:875-893</code>
+    }
+
+    class cli_context {
+        +server_context ctx_server
+        +json messages
+        +task_params defaults
+        +string generate_completion(result_timings&)
+        +common_chat_params format_chat()
+        +<code>tools/cli/cli.cpp:56-241</code>
+    }
+
+    class cmd_params {
+        +vector~string~ model
+        +vector~int~ n_prompt
+        +vector~int~ n_gen
+        +vector~int~ n_batch
+        +vector~ggml_type~ type_k
+        +vector~ggml_type~ type_v
+        +vector~int~ n_gpu_layers
+        +output_formats output_format
+        +int reps
+        +<code>tools/llama-bench/llama-bench.cpp:321-364</code>
+    }
+
+    class split_params {
+        +split_operation operation
+        +split_mode mode
+        +string input
+        +string output
+        +size_t n_bytes_split
+        +int n_split_tensors
+        +<code>tools/gguf-split/gguf-split.cpp:41-50</code>
+    }
+
+    class IMatrixCollector {
+        +unordered_map~string, Stats~ m_stats
+        +common_params m_params
+        +bool collect_imatrix(tensor, bool, void*)
+        +void save_imatrix()
+        +void save_imatrix_legacy()
+        +bool load_imatrix(const char*)
+        +<code>tools/imatrix/imatrix.cpp:58-75</code>
+    }
+
+    class test {
+        +string cpu_info
+        +string gpu_info
+        +string model_type
+        +uint64_t model_size
+        +int n_prompt
+        +int n_gen
+        +vector~uint64_t~ samples_ns
+        +uint64_t avg_ns()
+        +double avg_ts()
+        +<code>tools/llama-bench/llama-bench.cpp:1408-1507</code>
+    }
+
+    common_params --> common_params_sampling
+    common_params --> common_params_speculative
+    common_params --> common_params_model
+    common_params --> common_cpu_params
+    common_params_context --> common_params
+    common_params_context --> common_arg
+    cli_context --> task_params
+    cli_context --> server_context
+    cmd_params --> test
+    cmd_params --> cmd_params_instance
+    split_params --> split_strategy

@@ -1,0 +1,118 @@
+classDiagram
+    class ggml_opt_dataset {
+        -ggml_context* ctx
+        -ggml_backend_buffer_t buf
+        -ggml_tensor* data
+        -ggml_tensor* labels
+        -int64_t ndata
+        -int64_t ndata_shard
+        -size_t nbs_data
+        -size_t nbs_labels
+        -vector~int64_t~ permutation
+        +init(type_data, type_label, ne_datapoint, ne_label, ndata, ndata_shard)
+        +shuffle(opt_ctx, idata)
+        +get_batch(data_batch, labels_batch, ibatch)
+        +get_batch_host(data, nb, labels, ibatch)
+    }
+
+    class ggml_opt_context {
+        -ggml_backend_sched_t backend_sched
+        -ggml_cgraph* gf
+        -ggml_cgraph* gb_grad
+        -ggml_cgraph* gb_opt
+        -ggml_context* ctx_static
+        -ggml_context* ctx_compute
+        -ggml_backend_buffer_t buf_static
+        -mt19937 rng
+        -ggml_opt_loss_type loss_type
+        -ggml_opt_build_type build_type
+        -ggml_tensor* inputs
+        -ggml_tensor* outputs
+        -ggml_tensor* labels
+        -ggml_tensor* loss
+        -ggml_tensor* pred
+        -ggml_tensor* ncorrect
+        -vector~ggml_tensor*~ grad_accs
+        -vector~ggml_tensor*~ grad_m
+        -vector~ggml_tensor*~ grad_v
+        -ggml_opt_optimizer_type optimizer
+        +init(params)
+        +reset(optimizer)
+        +alloc(backward)
+        +eval(result)
+    }
+
+    class ggml_opt_result {
+        -int64_t ndata
+        -vector~float~ loss
+        -vector~int32_t~ pred
+        -int64_t ncorrect
+        +ndata(ndata)
+        +loss(loss, unc)
+        +pred(pred)
+        +accuracy(accuracy, unc)
+    }
+
+    class llama_opt_params {
+        +uint32_t n_ctx_train
+        +llama_opt_param_filter param_filter
+        +void* param_filter_ud
+        +ggml_opt_get_optimizer_params get_opt_pars
+        +void* get_opt_pars_ud
+        +ggml_opt_optimizer_type optimizer_type
+    }
+
+    class ggml_opt_optimizer_params {
+        +struct adamw { alpha, beta1, beta2, eps, wd }
+        +struct sgd { alpha, wd }
+    }
+
+    class IMatrixCollector {
+        -unordered_map~string, Stats~ m_stats
+        -common_params m_params
+        -mutex m_mutex
+        +collect_imatrix(t, ask, user_data) bool
+        +save_imatrix_legacy(ncall)
+        +save_imatrix(n_chunk)
+        +load_imatrix(file_name) bool
+    }
+
+    class common_imatrix {
+        +map~string, common_imatrix_entry~ entries
+        +vector~string~ datasets
+        +int32_t chunk_count
+        +int32_t chunk_size
+        +bool is_legacy
+        +bool has_metadata
+    }
+
+    class common_imatrix_entry {
+        +vector~float~ sums
+        +vector~int64_t~ counts
+    }
+
+    class llama_model_imatrix_data {
+        +const char* name
+        +const float* data
+        +size_t size
+    }
+
+    class lr_opt {
+        +float lr0
+        +float lr_min
+        +float wd
+        +float epochs
+        +float decay_epochs
+        +float scale_epoch
+        +init()
+        +get_lr(epoch) float
+    }
+
+    ggml_opt_context --> ggml_opt_dataset : uses
+    ggml_opt_context --> ggml_opt_result : produces
+    ggml_opt_optimizer_params <.. ggml_opt_context : config
+    llama_opt_params --> ggml_opt_context : wraps
+    llama_opt_params --> lr_opt : uses callback
+    common_imatrix --> common_imatrix_entry : contains
+    llama_model_imatrix_data --> common_imatrix : sourced from
+    IMatrixCollector --> common_imatrix : saves/loads

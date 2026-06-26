@@ -1,0 +1,96 @@
+sequenceDiagram
+    participant U as User
+    participant S as Server<br/>(server-schema.cpp)
+    participant C as common layer<br/>(sampling.cpp)
+    participant P as PEG Parser<br/>(peg-parser.cpp)
+    participant J as JSON Schema Converter<br/>(json-schema-to-grammar.cpp)
+    participant G as GBNF Parser<br/>(llama-grammar.cpp)
+    participant SM as Sampler Chain<br/>(llama-sampler.cpp)
+    participant GR as Grammar Runtime<br/>(llama-grammar.cpp)
+    participant LL as llguidance<br/>(llguidance.cpp)
+
+    Note over U,S: Two entry paths: GBNF string or JSON Schema
+
+    alt JSON Schema path
+        U->>S: POST /completions {json_schema: {...}}
+        S->>J: json_schema_to_grammar(schema)
+        alt llguidance available
+            J-->>S: "%llguidance {}\nstart: %json <schema>"
+            Note over J: line 1161
+        else no llguidance (force_gbnf)
+            J->>J: visit() recursive schema walk
+            J-->>S: GBNF grammar string
+            Note over J: line 1058-1170
+        end
+    else GBNF path
+        U->>S: POST /completions {grammar: "root ::= ..."}
+        S-->>S: uses as-is
+        Note over S: server-schema.cpp:252-273
+    end
+
+    alt PEG-built grammar (tool_calls)
+        U->>S: chat template triggers tool grammar
+        S->>P: common_peg_parser_builder builds IR
+        P->>P: build_grammar() -> GBNF string
+        P-->>S: GBNF grammar string
+        Note over P: peg-parser.cpp:1713
+    end
+
+    S->>C: llama_sampler_init_from_params()
+    C->>C: detect %llguidance prefix
+    Note over C: sampling.cpp:201
+
+    alt llguidance prefix
+        C->>LL: llama_sampler_init_llg(vocab, kind, data)
+        LL->>LL: create LlgTokenizer from vocab
+        LL->>LL: llg_new_matcher()
+        LL-->>C: llama_sampler*
+        Note over LL: llguidance.cpp:219-249
+    else built-in GBNF
+        C->>G: llama_grammar_init_impl(vocab, str, root, ...)
+        G->>G: parse grammar rules
+        G->>G: detect left recursion
+        G->>G: build initial stacks from start rule
+        G-->>C: llama_grammar*
+        Note over G: llama-grammar.cpp:1195-1299
+
+        C->>SM: llama_sampler_init_grammar_impl()
+        SM-->>C: llama_sampler* (wraps grammar)
+        Note over SM: llama-sampler.cpp:2532-2589
+
+        opt prefill
+            C->>C: feed gen_prompt tokens to grammar
+            Note over C: sampling.cpp:285-296
+        end
+    end
+
+    C->>SM: add to sampler chain
+
+    loop per generated token
+        SM->>GR: llama_grammar_apply_impl()
+        Note over SM,GR: llama-sampler.cpp:2448
+
+        alt llguidance
+            GR->>LL: llg_matcher_compute_mask()
+            LL-->>GR: bitmask
+        else built-in
+            GR->>GR: decode candidate tokens to UTF-8
+            GR->>GR: reject non-matching tokens
+            GR->>GR: set logits to -INFINITY
+        end
+        Note over GR: llama-grammar.cpp:1339-1379
+
+        SM->>SM: apply subsequent samplers (top-k, etc.)
+        SM-->>U: return selected token
+
+        SM->>GR: llama_grammar_accept_impl(token)
+        Note over SM,GR: llama-sampler.cpp:2441
+
+        alt llguidance
+            GR->>LL: llg_matcher_consume_token()
+        else built-in
+            GR->>GR: advance stacks for accepted token
+            GR->>GR: update partial UTF-8 state
+        end
+        Note over GR: llama-grammar.cpp:1382-1439
+    end

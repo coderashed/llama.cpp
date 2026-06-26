@@ -1,0 +1,69 @@
+sequenceDiagram
+    participant User
+    participant App as Application<br/>(embedding.cpp / server)
+    participant API as llama.h API
+    participant Ctx as llama_context
+    participant Graph as llm_graph_context
+    participant Backend as ggml_backend
+
+    User->>App: Provide text input
+    App->>API: llama_set_embeddings(ctx, true)
+    API->>Ctx: cparams.embeddings = true
+    App->>API: llama_pooling_type(ctx)
+    API->>Ctx: return cparams.pooling_type
+
+    Note over App,Graph: Tokenize + batch preparation
+
+    App->>API: llama_decode(ctx, batch)
+    API->>Ctx: decode(batch)
+
+    alt Encoder path
+        Ctx->>Graph: build_graph(params)
+        Graph->>Graph: build_pooling(cls, cls_b, ...)
+        alt pooling NONE
+            Graph->>Graph: identity (raw result_norm)
+        else pooling MEAN
+            Graph->>Graph: inp_mean -> mul_mat
+        else pooling CLS/LAST
+            Graph->>Graph: inp_cls -> get_rows
+        else pooling RANK
+            Graph->>Graph: mean/cls + classification head + softmax
+        end
+        Graph-->>Ctx: result_embd_pooled tensor
+        Ctx->>Backend: ggml_backend_tensor_get_async(t_embd)
+        Backend-->>Ctx: Copy pooled embeddings to host
+        alt pooling NONE
+            Ctx->>Ctx: embd.data[n_tokens * n_embd_out]
+        else pooling MEAN/CLS/LAST
+            Ctx->>Ctx: embd_seq[seq_id] = pooled vector
+        else pooling RANK
+            Ctx->>Ctx: embd_seq[seq_id] = n_cls_out scores
+        end
+    else Decoder path
+        Ctx->>Graph: build_graph(params)
+        Graph->>Graph: build_pooling(...)
+        Graph-->>Ctx: result_embd_pooled tensor
+        Ctx->>Backend: ggml_backend_tensor_get_async(t_embd)
+        Backend-->>Ctx: Append to embd.data / embd_seq
+    end
+
+    Ctx-->>API: return 0 (success)
+    API-->>App: success
+
+    alt pooling NONE
+        App->>API: llama_get_embeddings_ith(ctx, i)
+        API->>Ctx: get_embeddings_ith(i)
+        Ctx->>Ctx: output_resolve_row(i) -> j
+        Ctx-->>API: embd.data + j * n_embd_out
+    else pooling MEAN/CLS/LAST/RANK
+        App->>API: llama_get_embeddings_seq(ctx, seq_id)
+        API->>Ctx: get_embeddings_seq(seq_id)
+        Ctx->>Ctx: embd_seq.find(seq_id)
+        Ctx-->>API: pooled vector / scores
+    end
+    API-->>App: float* pointer
+
+    alt Server path
+        App->>App: common_embd_normalize(embd, out, n_embd, embd_norm)
+    end
+    App-->>User: Embedding vector(s) / rerank score(s)

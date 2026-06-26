@@ -1,0 +1,172 @@
+%% Class diagram: Speculative decoding types
+%% All references labeled file:line
+
+classDiagram
+    class common_speculative {
+        - dparams: common_speculative_draft_params_vec
+        - impls: vector~unique_ptr~common_speculative_impl~~
+        - impl_last: vector~common_speculative_impl*~
+        + common_speculative_init(params, n_seq): common_speculative*
+        + common_speculative_free(spec)
+        + common_speculative_begin(spec, seq_id, prompt)
+        + common_speculative_process(spec, batch): bool
+        + common_speculative_draft(spec)
+        + common_speculative_accept(spec, seq_id, n_accepted)
+        + common_speculative_print_stats(spec)
+        + common_speculative_need_embd(spec): bool
+        + common_speculative_need_embd_nextn(spec): bool
+        + common_speculative_get_state(spec, seq_id, data): bool
+        + common_speculative_set_state(spec, seq_id, data)
+        + common_speculative_n_max(spec): int32_t
+        __
+        file: speculative.h:6, speculative.cpp:1772
+    }
+
+    class common_speculative_impl {
+        <<abstract>>
+        # type: common_speculative_type
+        # n_seq: uint32_t
+        # n_call_begin, n_call_draft, n_call_accept: size_t
+        # n_gen_drafts, n_acc_drafts: size_t
+        # n_gen_tokens, n_acc_tokens: size_t
+        # t_begin_us, t_draft_us, t_accept_us: int64_t
+        + begin(seq_id, prompt) virtual*
+        + process(batch): bool virtual*
+        + draft(dparams) virtual*
+        + accept(seq_id, n_accepted, is_other) virtual*
+        + need_embd(): bool virtual*
+        + need_embd_nextn(): bool virtual
+        + get_state(seq_id, data): bool virtual
+        + set_state(seq_id, data) virtual
+        __
+        file: speculative.cpp:129
+    }
+
+    class common_speculative_impl_draft_simple {
+        - params: common_params_speculative_draft
+        - batch: llama_batch
+        - smpls: vector~common_sampler_ptr~
+        + draft(dparams)
+        __
+        top_k=10 sampling for draft tokens
+        file: speculative.cpp:175
+    }
+
+    class common_speculative_impl_draft_eagle3 {
+        - batch: llama_batch
+        - smpls: vector~common_sampler_ptr~
+        - backend_chains: vector~llama_sampler*~
+        - n_embd_dec, n_embd_enc, n_embd_tgt: int32_t
+        - target_layer_ids: int32_t*
+        - pending_g_last: vector~vector~float~~
+        - pending_pos_last: vector~llama_pos~
+        - verify_g: vector~vector~float~~
+        - verify_pos_first: vector~llama_pos~
+        - verify_g_rows: vector~int32_t~
+        + process(batch): bool
+        + draft(dparams)
+        + accept(seq_id, n_accepted, is_other)
+        + need_embd_nextn(): bool
+        __
+        Reads target hidden states, runs encoder+decoder
+        Deferred boundary pattern for cross-ubatch KV
+        file: speculative.cpp:419
+    }
+
+    class common_speculative_impl_draft_mtp {
+        - batch: llama_batch
+        - smpls: vector~common_sampler_ptr~
+        - n_embd: int32_t
+        - n_mtp_layers: int32_t
+        - is_mem_shared: bool
+        - chain_heads: bool
+        - pending_h: vector~vector~float~~
+        - verify_h: vector~vector~float~~
+        - chain_h: vector~vector~float~~
+        + process(batch): bool
+        + draft(dparams)
+        + accept(seq_id, n_accepted, is_other)
+        + need_embd_nextn(): bool
+        __
+        Multi-Token Prediction heads
+        Supports chain_heads (step35) & is_mem_shared (gemma4)
+        file: speculative.cpp:896
+    }
+
+    class common_speculative_impl_ngram_simple {
+        - params: common_params_speculative_ngram_map
+        - config: common_ngram_simple_config
+        + draft(dparams)
+        __
+        Lookup last n-gram in history, propose following m-gram
+        file: speculative.cpp:1343
+    }
+
+    class common_speculative_impl_ngram_map_k {
+        - config: vector~common_ngram_map~
+        + begin(seq_id, prompt)
+        + draft(dparams)
+        + accept(seq_id, n_accepted, is_other)
+        __
+        Hash-map key lookup, tracks accepted tokens per key
+        Shared ngram between k and k4v variants
+        file: speculative.cpp:1392
+    }
+
+    class common_speculative_impl_ngram_mod {
+        - mod: common_ngram_mod
+        - sinfos: vector~seq_info~
+        + begin(seq_id, prompt)
+        + draft(dparams)
+        + accept(seq_id, n_accepted, is_other)
+        __
+        Rolling LCG hash per n-gram, ~16MB pool, shared across slots
+        Adaptive: resets on low acceptance streaks
+        file: speculative.cpp:1450
+    }
+
+    class common_speculative_impl_ngram_cache {
+        - params: common_params_speculative_ngram_cache
+        - sinfos: vector~seq_info~
+        + begin(seq_id, prompt)
+        + draft(dparams)
+        __
+        3-level cache: context + dynamic + static
+        File-loadable static/dynamic lookup caches
+        file: speculative.cpp:1629
+    }
+
+    class common_speculative_draft_params {
+        + drafting: bool
+        + n_max: int32_t
+        + n_past: llama_pos
+        + id_last: llama_token
+        + prompt: const llama_tokens*
+        + result: llama_tokens*
+        __
+        Draft params per sequence, chaining flag
+        file: speculative.h:30
+    }
+
+    class common_params_speculative {
+        + types: vector~common_speculative_type~
+        + draft: common_params_speculative_draft
+        + ngram_mod: common_params_speculative_ngram_mod
+        + ngram_simple, ngram_map_k, ngram_map_k4v: ...
+        + ngram_cache: common_params_speculative_ngram_cache
+        + has_dft(): bool
+        + need_n_rs_seq(): uint32_t
+        __
+        file: common.h:361
+    }
+
+    common_speculative "1" --> "*" common_speculative_impl : contains
+    common_speculative_impl <|-- common_speculative_impl_draft_simple : inherits
+    common_speculative_impl <|-- common_speculative_impl_draft_eagle3 : inherits
+    common_speculative_impl <|-- common_speculative_impl_draft_mtp : inherits
+    common_speculative_impl <|-- common_speculative_impl_ngram_simple : inherits
+    common_speculative_impl <|-- common_speculative_impl_ngram_map_k : inherits
+    common_speculative_impl <|-- common_speculative_impl_ngram_mod : inherits
+    common_speculative_impl <|-- common_speculative_impl_ngram_cache : inherits
+    common_speculative ..> common_speculative_draft_params : uses
+    common_speculative ..> common_params_speculative : configured by

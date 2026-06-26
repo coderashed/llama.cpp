@@ -1,0 +1,215 @@
+---
+title: Memory Management -- Class/Struct Diagram
+---
+
+classDiagram
+    class llama_memory_i {
+        <<interface>>
+        +init_batch(balloc, n_ubatch, embd_all)* llama_memory_context_ptr
+        +init_full()* llama_memory_context_ptr
+        +init_update(lctx, optimize)* llama_memory_context_ptr
+        +get_can_shift()* bool
+        +clear(data)* void
+        +seq_rm(seq_id, p0, p1)* bool
+        +seq_cp(src, dst, p0, p1)* void
+        +seq_keep(seq_id)* void
+        +seq_add(seq_id, p0, p1, shift)* void
+        +seq_div(seq_id, p0, p1, d)* void
+        +seq_pos_min(seq_id)* pos
+        +seq_pos_max(seq_id)* pos
+        +memory_breakdown()* map
+        +state_write(io, seq_id, flags)* void
+        +state_read(io, seq_id, flags)* void
+    }
+    note for llama_memory_i "src/llama-memory.h:73"
+
+    class llama_memory_context_i {
+        <<interface>>
+        +next()* bool
+        +apply()* bool
+        +get_ubatch()* const llama_ubatch
+        +get_status()* llama_memory_status
+    }
+    note for llama_memory_context_i "src/llama-memory.h:51"
+
+    class llama_memory_params {
+        +ggml_type type_k
+        +ggml_type type_v
+        +bool swa_full
+        +llama_context_type ctx_type
+        +llama_memory_t mem_other
+    }
+    note for llama_memory_params "src/llama-memory.h:17"
+
+    class llama_memory_recurrent {
+        +head: uint32_t
+        +size: uint32_t
+        +used: uint32_t
+        +n_rs_seq: uint32_t
+        +rs_idx: vector~uint32_t~
+        +n: uint32_t
+        +rs_z: int32_t
+        +cells: vector~mem_cell~
+        +r_l: vector~ggml_tensor*~
+        +s_l: vector~ggml_tensor*~
+        +prepare(ubatches) bool
+        +find_slot(ubatch) bool
+        -ctxs_bufs: vector~pair~
+    }
+    note for llama_memory_recurrent "src/llama-memory-recurrent.h:17"
+
+    class llama_memory_recurrent_context {
+        -status: llama_memory_status
+        -mem: llama_memory_recurrent*
+        -i_next: size_t
+        -ubatches: vector~llama_ubatch~
+        -is_full: bool
+        +get_n_rs() uint32_t
+        +get_head() uint32_t
+        +get_rs_z() int32_t
+        +get_size() uint32_t
+        +get_r_l(il) ggml_tensor*
+        +get_s_l(il) ggml_tensor*
+        +s_copy(i) int32_t
+    }
+    note for llama_memory_recurrent_context "src/llama-memory-recurrent.h:136"
+
+    class llama_memory_hybrid {
+        -hparams: const llama_hparams
+        -mem_attn: unique_ptr~llama_kv_cache~
+        -mem_recr: unique_ptr~llama_memory_recurrent~
+        +get_mem_attn() llama_kv_cache*
+        +get_mem_recr() llama_memory_recurrent*
+    }
+    note for llama_memory_hybrid "src/llama-memory-hybrid.h:19"
+
+    class llama_memory_hybrid_context {
+        -i_next: size_t
+        -ubatches: vector~llama_ubatch~
+        -ctx_attn: const llama_memory_context_ptr
+        -ctx_recr: const llama_memory_context_ptr
+        -status: const llama_memory_status
+        +get_attn() const llama_kv_cache_context*
+        +get_recr() const llama_memory_recurrent_context*
+    }
+    note for llama_memory_hybrid_context "src/llama-memory-hybrid.h:93"
+
+    class llama_memory_hybrid_iswa {
+        -hparams: const llama_hparams
+        -mem_attn: unique_ptr~llama_kv_cache_iswa~
+        -mem_recr: unique_ptr~llama_memory_recurrent~
+        +get_mem_attn() llama_kv_cache_iswa*
+        +get_mem_recr() llama_memory_recurrent*
+    }
+    note for llama_memory_hybrid_iswa "src/llama-memory-hybrid-iswa.h:19"
+
+    class llama_memory_hybrid_iswa_context {
+        -i_next: size_t
+        -ubatches: vector~llama_ubatch~
+        -ctx_attn: const llama_memory_context_ptr
+        -ctx_recr: const llama_memory_context_ptr
+        -status: const llama_memory_status
+        +get_attn() const llama_kv_cache_iswa_context*
+        +get_recr() const llama_memory_recurrent_context*
+    }
+    note for llama_memory_hybrid_iswa_context "src/llama-memory-hybrid-iswa.h:93"
+
+    class llama_kv_cache {
+        +slot_info find_slot(ubatch, cont)
+        +slot_info_vec_t prepare(ubatches)
+        +void apply_ubatch(sinfo, ubatch)
+        -vector~kv_layer~ layers
+        -llama_kv_cells_vec v_cells
+    }
+    note for llama_kv_cache "src/llama-kv-cache.h:20"
+
+    class llama_kv_cache_context {
+        +get_n_kv() uint32_t
+        +get_k(ctx, il) ggml_tensor*
+        +get_v(ctx, il) ggml_tensor*
+        +cpy_k(ctx, k_cur, k_idxs, il) ggml_tensor*
+        +cpy_v(ctx, v_cur, v_idxs, il) ggml_tensor*
+    }
+    note for llama_kv_cache_context "src/llama-kv-cache.h:320"
+
+    class llama_kv_cache_iswa {
+        -kv_base: unique_ptr~llama_kv_cache~
+        -kv_swa: unique_ptr~llama_kv_cache~
+        +get_base() llama_kv_cache*
+        +get_swa() llama_kv_cache*
+    }
+    note for llama_kv_cache_iswa "src/llama-kv-cache-iswa.h:14"
+
+    class llama_kv_cache_iswa_context {
+        -ctx_base: const llama_memory_context_ptr
+        -ctx_swa: const llama_memory_context_ptr
+        +get_base() const llama_kv_cache_context*
+        +get_swa() const llama_kv_cache_context*
+    }
+    note for llama_kv_cache_iswa_context "src/llama-kv-cache-iswa.h:84"
+
+    class llama_kv_cache_dsa {
+        -kv_mla: unique_ptr~llama_kv_cache~
+        -kv_lid: unique_ptr~llama_kv_cache~
+        +get_mla() llama_kv_cache*
+        +get_lid() llama_kv_cache*
+    }
+    note for llama_kv_cache_dsa "src/llama-kv-cache-dsa.h:15"
+
+    class llm_graph_input_rs {
+        +s_copy: ggml_tensor*
+        +s_copy_main: ggml_tensor*
+        +s_copy_extra: ggml_tensor*
+        +head: uint32_t
+        +rs_z: int32_t
+        -mctx: const llama_memory_recurrent_context*
+    }
+    note for llm_graph_input_rs "src/llama-graph.h:246"
+
+    class llm_graph_input_mem_hybrid {
+        +inp_attn: unique_ptr~llm_graph_input_attn_kv~
+        +inp_rs: unique_ptr~llm_graph_input_rs~
+        -mctx: const llama_memory_hybrid_context*
+    }
+    note for llm_graph_input_mem_hybrid "src/llama-graph.h:477"
+
+    class llm_graph_input_mem_hybrid_iswa {
+        +inp_attn: unique_ptr~llm_graph_input_attn_kv_iswa~
+        +inp_rs: unique_ptr~llm_graph_input_rs~
+        -mctx: const llama_memory_hybrid_iswa_context*
+    }
+    note for llm_graph_input_mem_hybrid_iswa "src/llama-graph.h:533"
+
+    llama_memory_i <|-- llama_kv_cache : implements
+    llama_memory_i <|-- llama_kv_cache_iswa : implements
+    llama_memory_i <|-- llama_kv_cache_dsa : implements
+    llama_memory_i <|-- llama_memory_recurrent : implements
+    llama_memory_i <|-- llama_memory_hybrid : implements
+    llama_memory_i <|-- llama_memory_hybrid_iswa : implements
+
+    llama_memory_context_i <|-- llama_kv_cache_context : implements
+    llama_memory_context_i <|-- llama_kv_cache_iswa_context : implements
+    llama_memory_context_i <|-- llama_kv_cache_dsa_context : implements
+    llama_memory_context_i <|-- llama_memory_recurrent_context : implements
+    llama_memory_context_i <|-- llama_memory_hybrid_context : implements
+    llama_memory_context_i <|-- llama_memory_hybrid_iswa_context : implements
+
+    llama_memory_hybrid --> llama_kv_cache : mem_attn
+    llama_memory_hybrid --> llama_memory_recurrent : mem_recr
+    llama_memory_hybrid_iswa --> llama_kv_cache_iswa : mem_attn
+    llama_memory_hybrid_iswa --> llama_memory_recurrent : mem_recr
+    llama_kv_cache_iswa --> llama_kv_cache : kv_base
+    llama_kv_cache_iswa --> llama_kv_cache : kv_swa
+    llama_kv_cache_dsa --> llama_kv_cache : kv_mla
+    llama_kv_cache_dsa --> llama_kv_cache : kv_lid
+
+    llama_memory_hybrid_context --> llama_kv_cache_context : ctx_attn
+    llama_memory_hybrid_context --> llama_memory_recurrent_context : ctx_recr
+    llama_memory_hybrid_iswa_context --> llama_kv_cache_iswa_context : ctx_attn
+    llama_memory_hybrid_iswa_context --> llama_memory_recurrent_context : ctx_recr
+
+    llm_graph_input_rs --> llama_memory_recurrent_context : mctx
+    llm_graph_input_mem_hybrid --> llama_memory_hybrid_context : mctx
+    llm_graph_input_mem_hybrid_iswa --> llama_memory_hybrid_iswa_context : mctx
+    llm_graph_input_mem_hybrid --> llm_graph_input_attn_kv : inp_attn
+    llm_graph_input_mem_hybrid --> llm_graph_input_rs : inp_rs

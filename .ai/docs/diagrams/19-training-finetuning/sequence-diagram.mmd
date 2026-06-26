@@ -1,0 +1,56 @@
+sequenceDiagram
+    participant User
+    participant CLI as llama-finetune
+    participant llama as llama_context
+    participant opt as ggml_opt
+    participant cpu as ggml-cpu (ops)
+
+    User->>CLI: launch with model + data
+    CLI->>CLI: load model (no mmap)
+    CLI->>CLI: tokenize input text
+    CLI->>opt: ggml_opt_dataset_init(I32, I32, n_ctx, n_ctx, ndata, 1)
+    opt-->>CLI: dataset handle
+
+    loop for each epoch
+        CLI->>opt: ggml_opt_epoch_callback_progress_bar
+        CLI->>llama: llama_opt_epoch(ctx, dataset, result_train, result_eval, idata_split, callback)
+
+        Note over llama,opt: Training split
+        loop for each datapoint in training set
+            llama->>llama: opt_epoch_iter(ctx, tokens, labels, batch)
+            llama->>llama: build graph (forward)
+            llama->>opt: ggml_opt_prepare_alloc(opt_ctx, gf, inputs, outputs)
+            llama->>opt: ggml_opt_alloc(opt_ctx, backward=true)
+            opt->>opt: determine build_type (GRAD or OPT)
+            opt->>cpu: build backward graph
+            llama->>llama: set one-hot labels
+            llama->>opt: ggml_opt_eval(opt_ctx, result_train)
+            opt->>cpu: compute forward
+            cpu-->>opt: loss value
+            alt GRAD phase
+                opt->>cpu: compute backward (gradients)
+                cpu-->>opt: gradients in grad_accs
+            else OPT phase
+                opt->>cpu: compute backward (gradients)
+                opt->>opt: read optimizer params via callback
+                opt->>opt: write adamw/sgd params tensor
+                opt->>cpu: apply optimizer step
+                cpu->>cpu: w = w*keep - alpha * mh/vh  (AdamW)
+                cpu-->>opt: updated weights
+            end
+            opt-->>llama: result with loss/pred
+            llama->>CLI: callback progress bar
+        end
+
+        Note over llama,opt: Validation split
+        loop for each datapoint in validation set
+            llama->>opt: ggml_opt_alloc(opt_ctx, backward=false)
+            llama->>opt: ggml_opt_eval(opt_ctx, result_eval)
+            opt->>cpu: forward pass only
+            cpu-->>opt: loss value
+            opt-->>llama: result with loss
+            llama->>CLI: callback progress bar
+        end
+    end
+
+    CLI->>CLI: llama_model_save_to_file(model, "finetuned-model.gguf")

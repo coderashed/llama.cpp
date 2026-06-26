@@ -1,0 +1,214 @@
+graph TB
+    %% ============================================================================
+    %% 13-llama-server Component Diagram
+    %% ============================================================================
+
+    classDef boundary fill:#f9f9f9,stroke:#666,stroke-width:2px,stroke-dasharray:5 5
+    classDef subsystem fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef data_store fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef external fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    classDef api fill:#ffebee,stroke:#c62828,stroke-width:2px
+
+    subgraph "llama-server Feature"
+        direction TB
+
+        %% ---- HTTP Layer ----
+        subgraph HTTP["1. HTTP Server (server-http.cpp)"]
+            direction TB
+            SRV[server_http_context<br/>server-http.h:64]
+            INIT_HTTP[init() - SSL, CORS, API keys, thread pool<br/>server-http.cpp:77]
+            ROUTE_GET[get() - register GET handler<br/>server-http.cpp:529]
+            ROUTE_POST[post() - register POST handler<br/>server-http.cpp:546]
+            STREAM[process_handler_response - chunked provider<br/>server-http.cpp:492]
+            GCP[register_gcp_compat() - Vertex AI<br/>server-http.cpp:656]
+            UI[Embedded Web UI assets<br/>server-http.cpp:313]
+        end
+        class HTTP subsystem
+
+        %% ---- Route Handlers ----
+        subgraph ROUTES["2. Route Handlers (server-context.cpp)"]
+            direction TB
+            CHAT_HANDLER[post_chat_completions<br/>server-context.cpp:4683]
+            CMPL_HANDLER[post_completions<br/>server-context.cpp:4659]
+            INFILL_HANDLER[post_infill<br/>server-context.cpp:4581]
+            METRICS_HANDLER[get_metrics<br/>server-context.cpp:4337]
+            SLOTS_HANDLER[get_slots / post_slots<br/>server-context.cpp:4442]
+            CMPL_IMPL[handle_completions_impl<br/>server-context.cpp:4049]
+            COUNT_TOKENS[handle_count_tokens<br/>server-context.cpp:5299]
+        end
+        class ROUTES subsystem
+
+        %% ---- Chat/API Conversion ----
+        subgraph CHAT_CONV["3. API Conversion (server-chat.cpp)"]
+            direction TB
+            RESP2CHAT[server_chat_convert_responses_to_chatcmpl<br/>server-chat.cpp:6]
+            ANTH2OAI[server_chat_convert_anthropic_to_oai<br/>server-chat.h:17]
+            ASR2CHAT[convert_transcriptions_to_chatcmpl<br/>server-chat.h:20]
+        end
+        class CHAT_CONV subsystem
+
+        %% ---- OAI Parsing ----
+        subgraph OAI_PARSE["4. OAI Parsing (server-common.cpp)"]
+            direction TB
+            OAI_PARSE_FN[oaicompat_chat_params_parse<br/>server-common.cpp:904]
+            OAI_CMPL_PARSE[oaicompat_completion_params_parse<br/>server-common.h:304]
+            PROC_MTMD[process_mtmd_prompt<br/>server-common.cpp:690]
+            TOKENIZE_INPUT[tokenize_input_prompts<br/>server-common.h:275]
+        end
+        class OAI_PARSE subsystem
+
+        %% ---- Task Queue ----
+        subgraph QUEUE["5. Task Queue (server-queue.cpp)"]
+            direction TB
+            QUE[server_queue - task dispatch<br/>server-queue.h:13]
+            RESP[server_response - result channel<br/>server-queue.h:119]
+            READER[server_response_reader - generator API<br/>server-queue.h:168]
+            QUE_LOOP[start_loop - main processing loop<br/>server-queue.cpp:125]
+        end
+        class QUEUE subsystem
+
+        %% ---- Task Types ----
+        subgraph TASKS["6. Task & Result Types (server-task.h)"]
+            direction TB
+            TASK_TYPES[server_task_type enum<br/>server-task.h:16-30]
+            TASK_STRUCT[server_task - params + tokens<br/>server-task.h:133]
+            RES_CMPL_FINAL[server_task_result_cmpl_final<br/>server-task.h:337]
+            RES_CMPL_PARTIAL[server_task_result_cmpl_partial<br/>server-task.h:412]
+            RES_EMBD[server_task_result_embd<br/>server-task.h:470]
+            RES_ERR[server_task_result_error<br/>server-task.h:493]
+            RES_METRICS[server_task_result_metrics<br/>server-task.h:508]
+            STATE_T[task_result_state - streaming state<br/>server-task.h:103]
+            PARAMS[task_params - sampling + schema<br/>server-task.h:50]
+            SCHEMA[server_schema::eval_llama_cmpl_schema<br/>server-schema.h:98]
+        end
+        class TASKS subsystem
+
+        %% ---- Inference Context ----
+        subgraph CTX["7. Inference Context (server-context.cpp)"]
+            direction TB
+            SLOT_SYSTEM[slot_state machine<br/>server-context.cpp:57]
+            CMD_PROC[callback_new_task - assign to slot<br/>server-queue.cpp:157]
+            UPDATE_SLOTS[callback_update_slots - run inference<br/>server-queue.cpp:163]
+        end
+        class CTX subsystem
+
+        %% ---- Model Router ----
+        subgraph ROUTER["8. Multi-Model Router (server-models.cpp)"]
+            direction TB
+            MODELS_MGR[server_models - map model_name -> instance<br/>server-models.h:105]
+            MODELS_META[server_model_meta - status + caps<br/>server-models.h:69]
+            MODELS_STATUS[server_model_status enum<br/>server-models.h:27-35]
+            MODELS_LOAD[load() - spawn child process<br/>server-models.h:176]
+            PROXY_REQ[proxy_request() - HTTP forward to child<br/>server-models.cpp:1266]
+            HTTP_PROXY[server_http_proxy - streaming proxy<br/>server-models.h:277]
+            CHILD_STATE[handle_child_state() - state updates<br/>server-models.cpp:1299]
+            CHILD[server_child - child side setup<br/>server-models.h:220]
+            ROUTES_MGR[server_models_routes - management endpoints<br/>server-models.h:239]
+        end
+        class ROUTER subsystem
+
+        %% ---- Built-in Tools ----
+        subgraph TOOLS["9. Built-in Tools (server-tools.cpp)"]
+            direction TB
+            TOOL_IF[server_tool abstract base<br/>server-tools.h:6]
+            TOOL_MGR[server_tools setup / invoke<br/>server-tools.h:18]
+            TOOL_READ[read_file<br/>server-tools.cpp:124]
+            TOOL_GLOB[file_glob_search<br/>server-tools.cpp:207]
+            TOOL_GREP[grep_search<br/>server-tools.cpp:271]
+            TOOL_EXEC[exec_shell_command<br/>server-tools.cpp:369]
+            TOOL_WRITE[write_file<br/>server-tools.cpp:425]
+            TOOL_EDIT[edit_file<br/>server-tools.cpp:480]
+            TOOL_DIFF[apply_diff<br/>server-tools.cpp:650]
+            TOOL_DATE[get_datetime<br/>server-tools.cpp:706]
+        end
+        class TOOLS subsystem
+
+        %% ---- CORS Proxy ----
+        subgraph CORSPROXY["10. CORS Proxy (server-cors-proxy.h)"]
+            direction TB
+            PROXY_HANDLER[proxy_handler_get/post<br/>server-cors-proxy.h:77-82]
+        end
+        class CORSPROXY subsystem
+
+        %% ---- External Dependencies ----
+        subgraph EXTERNAL["External Dependencies"]
+            direction TB
+            LLAMA_API[llama.h / llama_context<br/>src/llama-context.cpp]
+            SAMPLING[Sampling<br/>common/sampling.h]
+            GRAMMAR[Grammar / PEG Parsing<br/>common/grammar.h, peg-parser.h]
+            CHAT_TMPL[Chat Templates<br/>common/chat.h, common/jinja/]
+            MTMD[Multimodal Processing<br/>mtmd.h, mtmd-helper.h]
+            HTTPLIB[cpp-httplib<br/>external]
+        end
+        class EXTERNAL external
+    end
+    class boundary boundary
+
+    %% ---------- Internal Connections ----------
+    ROUTE_GET --> SRV
+    ROUTE_POST --> SRV
+    SRV --> INIT_HTTP
+    SRV --> STREAM
+
+    CHAT_HANDLER --> OAI_PARSE_FN
+    CHAT_HANDLER --> CMPL_IMPL
+    CMPL_HANDLER --> CMPL_IMPL
+    INFILL_HANDLER --> CMPL_IMPL
+
+    OAI_PARSE_FN --> PROC_MTMD
+    OAI_PARSE_FN --> TOKENIZE_INPUT
+
+    RESP2CHAT --> CHAT_HANDLER
+    ANTH2OAI --> ROUTES
+
+    CMPL_IMPL --> TASKS : creates server_task
+    CMPL_IMPL --> QUEUE : post_task via reader
+    CMPL_IMPL --> RES_CMPL_FINAL : format result
+
+    QUE --> QUE_LOOP
+    READER --> QUE
+    READER --> RESP
+    RESP --> TASKS : receives server_task_result_ptr
+
+    TASK_STRUCT --> PARAMS
+    PARAMS --> SCHEMA
+    STATE_T --> RES_CMPL_PARTIAL : updates diffs
+
+    CMD_PROC --> SLOT_SYSTEM
+    UPDATE_SLOTS --> SLOT_SYSTEM
+    UPDATE_SLOTS --> LLAMA_API : llama_decode()
+
+    MODELS_MGR --> CHILD : spawn child process
+    MODELS_MGR --> PROXY_REQ : forward request
+    PROXY_REQ --> HTTP_PROXY
+    CHILD_STATE --> MODELS_META : update status
+    CHILD --> CHILD_STATE : notify_to_router()
+
+    TOOL_MGR --> TOOL_READ
+    TOOL_MGR --> TOOL_GLOB
+    TOOL_MGR --> TOOL_GREP
+    TOOL_MGR --> TOOL_EXEC
+    TOOL_MGR --> TOOL_WRITE
+    TOOL_MGR --> TOOL_EDIT
+    TOOL_MGR --> TOOL_DIFF
+    TOOL_MGR --> TOOL_DATE
+
+    %% ---------- External Connections ----------
+    SLOT_SYSTEM --> LLAMA_API
+    PARAMS --> SAMPLING
+    SCHEMA --> GRAMMAR
+    OAI_PARSE_FN --> CHAT_TMPL : common_chat_templates_apply()
+    PROC_MTMD --> MTMD : mtmd_tokenize()
+    SRV --> HTTPLIB
+
+    style HTTP fill:#e3f2fd
+    style ROUTES fill:#e8eaf6
+    style CHAT_CONV fill:#f3e5f5
+    style OAI_PARSE fill:#fff3e0
+    style QUEUE fill:#e0f2f1
+    style TASKS fill:#fce4ec
+    style CTX fill:#f1f8e9
+    style ROUTER fill:#fff9c4
+    style TOOLS fill:#efebe9
+    style CORSPROXY fill:#fbe9e7
+    style EXTERNAL fill:#f5f5f5

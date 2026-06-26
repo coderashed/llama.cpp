@@ -1,0 +1,98 @@
+flowchart LR
+    subgraph public ["Public C API (include/llama.h)"]
+        LLAMA_API["LLAMA_API macro<br/>include/llama.h:15-27"]
+        DEPR["DEPRECATED macro<br/>include/llama.h:29-35"]
+    end
+
+    subgraph api_families ["API Function Families"]
+        BACKEND["Backend lifecycle<br/>llama_backend_init / free<br/>include/llama.h:451-461"]
+        MODEL_LD["Model loading<br/>llama_model_load_from_file<br/>include/llama.h:475-512"]
+        CTX_LD["Context<br/>llama_init_from_model / free<br/>include/llama.h:514-524"]
+        MODEL_Q["Model queries<br/>llama_model_n_* / desc / size<br/>include/llama.h:540-638"]
+        VOCAB["Vocabulary<br/>llama_vocab_* / token type<br/>include/llama.h:558-616, 1064-1120"]
+        TOKENIZE["Tokenization<br/>llama_tokenize / to_piece / detokenize<br/>include/llama.h:1121-1170"]
+        BATCH["Batch<br/>llama_batch_init / free / get_one<br/>include/llama.h:912-936"]
+        INFER["Inference<br/>llama_encode / decode<br/>include/llama.h:938-962"]
+        OUTPUT["Outputs<br/>llama_get_logits / embeddings<br/>include/llama.h:998-1059"]
+        SAMPLING["Sampling<br/>llama_sampler_chain_init / *_init_*<br/>include/llama.h:1197-1495"]
+        ADAPTER["Adapters<br/>llama_adapter_lora_* / set_adapters<br/>include/llama.h:648-701"]
+        MEM["Memory<br/>llama_memory_seq_* / clear<br/>include/llama.h:704-776"]
+        STATE["State save/load<br/>llama_state_*<br/>include/llama.h:778-907"]
+        CHAT["Chat templates<br/>llama_chat_apply_template<br/>include/llama.h:1172-1195"]
+        PERF["Performance<br/>llama_perf_context / sampler<br/>include/llama.h:1520-1550"]
+        QUANT["Quantization<br/>llama_model_quantize<br/>include/llama.h:637-643"]
+        TRAIN["Training<br/>llama_opt_init / epoch<br/>include/llama.h:1552-1583"]
+    end
+
+    subgraph opaque_types ["Opaque Handle Types"]
+        OM["llama_model*<br/>include/llama.h:62"]
+        OC["llama_context*<br/>include/llama.h:63"]
+        OV["llama_vocab*<br/>include/llama.h:61"]
+        OS["llama_sampler*<br/>include/llama.h:64"]
+        OA["llama_adapter_lora*<br/>include/llama.h:442"]
+    end
+
+    subgraph impl_cpp ["Internal C++ Implementation"]
+        IM["llama_model (PIMPL)<br/>src/llama-model.h:522<br/>src/llama-model.cpp:973"]
+        IC["llama_context<br/>src/llama-context.h:42<br/>src/llama-context.cpp:1"]
+        IV["llama_vocab (PIMPL)<br/>src/llama-vocab.h:72<br/>src/llama-vocab.cpp:1765"]
+        IS["llama_sampler_chain<br/>src/llama-sampler.h:12"]
+        IA["llama_adapter_lora<br/>src/llama-adapter.h:63"]
+        IML["llama_model_loader<br/>src/llama-model-loader.h:31"]
+        IMS["llama_model_saver<br/>src/llama-model-saver.cpp"]
+    end
+
+    subgraph ggml_libs ["ggml Libraries"]
+        GGML["ggml (tensor library)"]
+        GGB["ggml-backend<br/>(device/buffer mgmt)"]
+        GGC["ggml-cpu<br/>(CPU backend)"]
+        GGU["gguf<br/>(file format)"]
+        GGO["ggml-opt<br/>(optimizer)"]
+    end
+
+    LLAMA_API --> BACKEND
+    LLAMA_API --> MODEL_LD
+    LLAMA_API --> CTX_LD
+    LLAMA_API --> MODEL_Q
+    LLAMA_API --> VOCAB
+    LLAMA_API --> TOKENIZE
+    LLAMA_API --> BATCH
+    LLAMA_API --> INFER
+    LLAMA_API --> OUTPUT
+    LLAMA_API --> SAMPLING
+    LLAMA_API --> ADAPTER
+    LLAMA_API --> MEM
+    LLAMA_API --> STATE
+    LLAMA_API --> CHAT
+    LLAMA_API --> PERF
+    LLAMA_API --> QUANT
+    LLAMA_API --> TRAIN
+
+    MODEL_LD --> OM
+    CTX_LD --> OC
+    VOCAB --> OV
+    SAMPLING --> OS
+    ADAPTER --> OA
+
+    MODEL_LD --> IML
+    MODEL_LD --> IMS
+    MODEL_LD --> IM
+    CTX_LD --> IC
+    VOCAB --> IV
+    SAMPLING --> IS
+    ADAPTER --> IA
+
+    IM --> IC
+    IM --> IV
+    IM --> IA
+
+    IM --> GGU
+    IM --> GGB
+    IC --> GGB
+    IC --> GGML
+    IC --> GGO
+    IML --> GGU
+    IMS --> GGU
+
+    BACKEND --> GGB
+    BACKEND --> GGC

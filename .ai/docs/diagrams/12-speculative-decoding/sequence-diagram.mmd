@@ -1,0 +1,56 @@
+%% Sequence diagram: Speculative decoding generation loop (server workflow)
+%% All references labeled file:line
+
+sequenceDiagram
+    participant Server as server-context.cpp<br/>update_slots()
+    participant Speculative as common_speculative<br/>speculative.cpp
+    participant DraftModel as ctx_dft<br/>draft model
+    participant TargetModel as ctx_tgt<br/>target model
+    participant Sampler as common_sampler<br/>sampling.cpp
+
+    Note over Server,Sampler: === DRAFT GENERATION ===
+
+    Server->>Speculative: common_speculative_get_draft_params()<br/>(server-context.cpp:2961)
+    Server->>Speculative: common_speculative_draft()<br/>(speculative.cpp:2121)
+    Speculative->>Speculative: iterate impls, call impl->draft()<br/>(speculative.cpp:2144)
+
+    alt draft-simple / draft-eagle3 / draft-mtp
+        Speculative->>DraftModel: llama_decode(ctx_dft, batch)<br/>(speculative.cpp:291, 745, 1218)
+        DraftModel-->>Speculative: logits
+        Speculative->>Sampler: common_sampler_sample()<br/>(speculative.cpp:311, etc.)
+        Sampler-->>Speculative: draft token id
+        Speculative->>DraftModel: llama_decode(ctx_dft, batch) for next pos<br/>(speculative.cpp:355)
+        Note over Speculative,DraftModel: Repeat until p_min threshold or n_max
+    else ngram-simple / ngram-map-* / ngram-mod / ngram-cache
+        Speculative->>Speculative: compute draft from ngram history<br/>(speculative.cpp:1379, 1431, 1584, 1750)
+        Note over Speculative: No draft model decode needed
+    end
+    Speculative-->>Server: draft tokens (spec_draft)<br/>(server-context.cpp:2978)
+
+    Note over Server,Sampler: === CHECKPOINTING ===
+
+    Server->>Server: save spec_ckpt if needed<br/>(server-context.cpp:2982-3024)
+    Server->>Server: handle_last_sampled_token() -> batch.add(id_last + drafts)<br/>(server-context.cpp:3028-3030, 447-481)
+
+    Note over Server,Sampler: === TARGET MODEL VERIFY ===
+
+    Server->>TargetModel: llama_decode(ctx_tgt, batch)<br/>(server-context.cpp:3599)
+    TargetModel-->>Server: logits (n_draft+1 positions)
+    Server->>Speculative: common_speculative_process(batch)<br/>(server-context.cpp:3656)
+    Speculative->>Speculative: impl->process() for each impl<br/>(speculative.cpp:2079)
+    Note over Speculative: EAGLE3/MTP: extract h_nextn<br/>and run encoder+decoder on ctx_dft
+
+    Server->>Sampler: common_sampler_sample_and_accept_n()<br/>(server-context.cpp:3822, sampling.cpp:624)
+    Sampler->>Sampler: for each pos i: sample target token<br/>if matches draft[i], continue; else stop
+    Sampler-->>Server: accepted tokens vector
+
+    alt partial acceptance
+        Server->>Server: restore spec_ckpt, truncate draft<br/>(server-context.cpp:3840-3862)
+    else full acceptance
+        Server->>Speculative: common_speculative_accept(accepted.size-1)<br/>(server-context.cpp:3870, speculative.cpp:2202)
+        Speculative->>Speculative: impl->accept() + inc stats<br/>(speculative.cpp:2214-2224)
+        Speculative->>Speculative: notify other impls (is_other=true)<br/>(speculative.cpp:2228-2232)
+    end
+
+    Server->>Server: process accepted tokens, send to client<br/>(server-context.cpp:3904-3923)
+    Server->>Server: clear KV beyond n_past<br/>(server-context.cpp:3899-3902)

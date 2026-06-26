@@ -1,0 +1,138 @@
+sequenceDiagram
+    box rgb(200,220,255) Entry Point
+        participant main as convert_hf_to_gguf:main
+    end
+    box rgb(200,255,220) Conversion Base
+        participant base as ModelBase
+        participant text as TextModel.__init__
+        participant idx as index_tensors
+        participant prep as prepare_tensors
+        participant write_fn as write
+    end
+    box rgb(255,230,200) Per-Arch
+        participant arch_cls as converter class
+    end
+    box rgb(255,200,200) GGUF Writer
+        participant writer as GGUFWriter
+        participant quant as gguf.quants.quantize
+    end
+
+    main ->> base: load_hparams(dir_model)
+    note right of base: base.py:1042
+    activate base
+    base-->>main: hparams dict
+    deactivate base
+
+    main ->> base: get_model_architecture(hparams, model_type)
+    note right of base: base.py:2603
+    activate base
+    base-->>main: arch string
+    deactivate base
+
+    main ->> main: get_model_class(arch)
+    note right of main: __init__.py:340
+    main ->> arch_cls: converter_class = get_model_class(arch)
+    note right of arch_cls: lazy-import from conversion/*.py
+
+    main ->>+ arch_cls: __init__(dir_model, ftype, fname_out, ...)
+    arch_cls ->>+ base: ModelBase.__init__(...)
+    note right of base: base.py:116
+
+    base ->> base: load_hparams (if not provided)
+    base ->>+ idx: index_tensors(remote_hf_model_id)
+    note right of idx: base.py:198
+
+    alt remote model
+        idx ->> idx: SafetensorRemote.get_list_tensors_hf_model
+        note right of idx: base.py:205
+        idx ->> idx: LazyTorchTensor.from_remote_tensor
+    else local safetensors
+        idx ->> idx: get_model_part_names(dir_model, "model", ".safetensors")
+        note right of idx: base.py:215
+        idx ->> idx: LazyTorchTensor.from_local_tensor
+    else local pytorch
+        idx ->> idx: get_model_part_names(dir_model, "pytorch_model", ".bin")
+        note right of idx: base.py:218
+        idx ->> idx: torch.load(mmap=True)
+    end
+
+    idx ->> idx: filter_tensors(name, gen)
+    note right of idx: base.py:569
+    idx-->>-base: self.model_tensors filled
+    deactivate idx
+
+    base ->> base: create GGUFWriter (path=None, arch=...)
+    note right of base: base.py:178
+    base-->>-arch_cls: init done
+
+    arch_cls ->>+ text: TextModel.__init__(...)
+    note right of text: base.py:1104
+    text ->> text: find_hparam -> block_count
+    note right of text: base.py:1115
+    text ->> text: gguf.get_tensor_name_map -> tensor_map
+    note right of text: base.py:1116
+    text-->>-arch_cls: text init done
+    arch_cls-->>-main: model_instance ready
+
+    main ->>+ write_fn: model_instance.write()
+    note right of write_fn: base.py:1022
+
+    write_fn ->>+ prep: prepare_tensors()
+    note right of prep: base.py:785
+
+    prep ->> prep: detect NVFP4 quantization
+    note right of prep: base.py:786-822
+    prep ->> prep: dequant_model()
+    note right of prep: base.py:855(base.py:305)
+
+    loop for each tensor (generate_extra_tensors + get_tensors)
+        prep ->>+ arch_cls: generate_extra_tensors()
+        note right of arch_cls: base.py:650
+        arch_cls-->>-prep: extra tensors
+        prep ->> prep: get_tensors() iterate model_tensors
+        prep ->>+ arch_cls: modify_tensors(data_torch, name, bid)
+        note right of arch_cls: base.py:615
+        alt expert fusion
+            arch_cls ->> arch_cls: fuse gate/up buffers
+            note right of arch_cls: base.py:619-633
+        end
+        arch_cls-->>-prep: (new_name, data_torch) pairs
+        prep ->> prep: tensor_force_quant -> decide qtype
+        note right of prep: base.py:642
+        prep ->>+ quant: quantize(data, data_qtype)
+        note right of quant: base.py:965
+        alt QuantError
+            quant-->>prep: fallback to F16
+            note right of prep: base.py:966-969
+        end
+        quant-->>-prep: quantized numpy data
+        prep ->>+ writer: add_tensor(new_name, data, raw_dtype)
+        note right of writer: gguf_writer.py:375
+        writer-->>-prep: tensor registered
+    end
+
+    prep-->>-write_fn: tensors populated in gguf_writer
+
+    write_fn ->> write_fn: prepare_metadata(vocab_only=False)
+    note right of write_fn: base.py:1024
+
+    write_fn ->>+ writer: write_header_to_file(path)
+    note right of writer: gguf_writer.py:214
+    writer ->> writer: write magic + version + counts
+    writer-->>-write_fn: header written
+
+    write_fn ->>+ writer: write_kv_data_to_file()
+    note right of writer: gguf_writer.py:237
+    writer ->> writer: write typed KV pairs
+    writer-->>-write_fn: KV data written
+
+    write_fn ->>+ writer: write_tensors_to_file(progress=True)
+    note right of writer: gguf_writer.py:438
+    writer ->> writer: write_ti_data_to_file() -> tensor info
+    note right of writer: gguf_writer.py:254
+    writer ->> writer: write raw weight bytes
+    writer-->>-write_fn: tensors written
+
+    write_fn ->> writer: close()
+    note right of writer: gguf_writer.py:490
+    write_fn-->>-main: GGUF file ready

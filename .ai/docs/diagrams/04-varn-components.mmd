@@ -1,0 +1,52 @@
+---
+title: VarN File Ownership and Integration
+---
+flowchart LR
+    subgraph HEADER["Header: src/llama-kvarn.h"]
+        H_API["kvarn_variance_normalize()\nfunction declaration"]
+    end
+
+    subgraph IMPL["Implementation: src/llama-kvarn.cpp"]
+        I_VN["kvarn_variance_normalize()\n- Algorithm 1 implementation\n- column_normalize() internal\n- row_normalize() internal\n- imb_metric() internal\n- best-state tracking"]
+    end
+
+    subgraph STD["Standard Library Dependencies"]
+        STDC["<cmath>\n- std::log, std::exp"]
+        STDC2["<algorithm>\n- std::clamp (C++17)"]
+        STDC3["<cfloat>\n- FLT_MAX (for best_Imb init)"]
+    end
+
+    subgraph FUTURE01["Future: Item 03 - Quantization Kernel"]
+        Q03["quantize_q2_kvarn()\nggml/src/ggml-quants.c\n- absorbs S_c into s1\n- absorbs S_r into s2"]
+    end
+
+    subgraph FUTURE02["Future: Item 05 - Pipeline Integration"]
+        I05["llama-kv-cache.cpp\n- calls kvarn_variance_normalize()\nbefore quantization\n- on 128-token groups"]
+    end
+
+    subgraph FUTURE03["Future: Item 01 - Q2_KVARN Type"]
+        T01["block_q2_kvarn struct\nggml/src/ggml-common.h\n- stores s1 (S_c absorbed)\n- stores s2 (S_r)\n- stores qs (2-bit values)\n- stores d (zeropoint)"]
+    end
+
+    HEADER --> IMPL
+    IMPL --> STDC
+    IMPL --> STDC2
+    IMPL --> STDC3
+
+    IMPL -. "S_c / S_r consumed by" .-> FUTURE01
+    FUTURE02 -. "calls" .-> HEADER
+    FUTURE01 -. "stores into" .-> FUTURE03
+
+    note for HEADER "New file: src/llama-kvarn.h\nFunction declaration with doc comment\nguard: #pragma once"
+    note for IMPL "New file: src/llama-kvarn.cpp\nAll internal helpers are static / anonymous namespace\nNo global state"
+    note for STD "C++17 standard library only\nNo ggml dependency (pure math)"
+    note for FUTURE01 "Item 03 absorbs VarN scales:\ns1[c] = rt_scale[c] * S_c[c]\ns2[r] = S_r[r]"
+    note for FUTURE02 "Item 05 calls VarN after Hadamard,\nbefore RTN quantization"
+
+    classDef new fill:#e3f2fd,stroke:#1565c0
+    classDef std fill:#f5f5f5,stroke:#9e9e9e
+    classDef future fill:#fff8e1,stroke:#f9a825
+
+    class HEADER,IMPL new
+    class STD,STDC,STDC2,STDC3 std
+    class FUTURE01,FUTURE02,FUTURE03 future

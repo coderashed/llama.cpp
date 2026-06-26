@@ -1,0 +1,196 @@
+classDiagram
+    class llama_memory_i {
+        <<interface>>
+        +init_batch() llama_memory_context_ptr
+        +init_full() llama_memory_context_ptr
+        +init_update() llama_memory_context_ptr
+        +get_can_shift() bool
+        +clear(data) void
+        +seq_rm() bool
+        +seq_cp() void
+        +seq_keep() void
+        +seq_add() void
+        +seq_div() void
+        +seq_pos_min() llama_pos
+        +seq_pos_max() llama_pos
+        +memory_breakdown() map
+        +state_write() void
+        +state_read() void
+    }
+
+    class llama_memory_context_i {
+        <<interface>>
+        +next() bool
+        +apply() bool
+        +get_ubatch() llama_ubatch&
+        +get_status() llama_memory_status
+    }
+
+    class llama_kv_cache {
+        -model: llama_model&
+        -hparams: llama_hparams&
+        -v_trans: bool
+        -n_seq_max: uint32_t
+        -n_stream: uint32_t
+        -n_pad: uint32_t
+        -n_swa: uint32_t
+        -swa_type: llama_swa_type
+        -attn_rot_k: bool
+        -attn_rot_v: bool
+        -n_embd_head_k_all: int32_t
+        -n_embd_head_v_all: int32_t
+        -attn_rot_hadamard: map
+        -v_cells: llama_kv_cells_vec&
+        -v_heads: vector~uint32_t~
+        -seq_to_stream: vector~uint32_t~
+        -sc_info: stream_copy_info
+        -layers: vector~kv_layer~
+        -ctxs_bufs: vector~pair~
+        -map_layer_ids: unordered_map
+        -other: llama_kv_cache*
+        +find_slot() slot_info
+        +apply_ubatch() void
+        +prepare() slot_info_vec_t
+        +update() bool
+        +get_k() ggml_tensor*
+        +get_v() ggml_tensor*
+        +cpy_k() ggml_tensor*
+        +cpy_v() ggml_tensor*
+        +set_input_k_idxs() void
+        +set_input_v_idxs() void
+        +set_input_kq_mask() void
+        +set_input_k_shift() void
+        +set_input_k_rot() void
+        +set_input_v_rot() void
+        -build_graph_shift() ggml_cgraph*
+        -build_rope_shift() ggml_tensor*
+    }
+
+    class llama_kv_cells {
+        -used: set~uint32_t~
+        -pos: vector~llama_pos~
+        -ext: vector~llama_kv_cell_ext~
+        -shift: vector~llama_pos~
+        -seq: vector~bitset~
+        -seq_pos: map~llama_pos, int~[LLAMA_MAX_SEQ]
+        -has_shift: bool
+        +reset() void
+        +is_empty(i) bool
+        +get_used() uint32_t
+        +used_min() uint32_t
+        +used_max_p1() uint32_t
+        +rm(i) void
+        +seq_rm(i, seq_id) bool
+        +seq_keep(i, seq_id) bool
+        +seq_add(i, seq_id) void
+        +seq_has(i, seq_id) bool
+        +seq_count(i) int
+        +seq_get(i) llama_seq_id
+        +pos_get(i) llama_pos
+        +pos_set(i, p) void
+        +pos_in(i, p0, p1) bool
+        +pos_add(i, d) bool
+        +pos_div(i, d) void
+        +get_shift(i) llama_pos
+        +ext_get(i) llama_kv_cell_ext&
+        +ext_set(i, ext) void
+        +seq_pos_min(seq_id) llama_pos
+        +seq_pos_max(seq_id) llama_pos
+        +cp() llama_kv_cells
+        +set() void
+    }
+
+    class llama_kv_cell_ext {
+        +x: llama_pos
+        +y: llama_pos
+        +is_2d_gt() bool
+        +reset() void
+    }
+
+    class llama_kv_cache_context {
+        -status: llama_memory_status
+        -kv: llama_kv_cache*
+        -lctx: llama_context*
+        -do_shift: bool
+        -sc_info: stream_copy_info
+        -i_cur: size_t
+        -sinfos: slot_info_vec_t
+        -ubatches: vector~llama_ubatch~
+        -n_kv: int32_t
+        +next() bool
+        +apply() bool
+        +get_k() ggml_tensor*
+        +get_v() ggml_tensor*
+        +cpy_k() ggml_tensor*
+        +cpy_v() ggml_tensor*
+    }
+
+    class llama_kv_cache_dsa {
+        -hparams_lid: llama_hparams
+        -n_stream: uint32_t
+        -kv_mla: unique_ptr~llama_kv_cache~
+        -kv_lid: unique_ptr~llama_kv_cache~
+        +get_mla() llama_kv_cache*
+        +get_lid() llama_kv_cache*
+    }
+
+    class llama_kv_cache_dsa_context {
+        -i_next: size_t
+        -ubatches: vector~llama_ubatch~
+        -ctx_mla: llama_memory_context_ptr
+        -ctx_lid: llama_memory_context_ptr
+        -status: llama_memory_status
+        +get_mla() llama_kv_cache_context*
+        +get_lid() llama_kv_cache_context*
+    }
+
+    class llama_kv_cache_iswa {
+        -hparams: llama_hparams&
+        -unified: bool
+        -kv_base: unique_ptr~llama_kv_cache~
+        -kv_swa: unique_ptr~llama_kv_cache~
+        +get_base() llama_kv_cache*
+        +get_swa() llama_kv_cache*
+    }
+
+    class llama_kv_cache_iswa_context {
+        -i_next: size_t
+        -ubatches: vector~llama_ubatch~
+        -ctx_base: llama_memory_context_ptr
+        -ctx_swa: llama_memory_context_ptr
+        -status: llama_memory_status
+        +get_base() llama_kv_cache_context*
+        +get_swa() llama_kv_cache_context*
+    }
+
+    class slot_info {
+        +s0: uint32_t
+        +s1: uint32_t
+        +strm: vector~llama_seq_id~
+        +idxs: vector~idx_vec_t~
+        +head() uint32_t
+        +is_contiguous() bool
+    }
+
+    class kv_layer {
+        +il: uint32_t
+        +k: ggml_tensor*
+        +v: ggml_tensor*
+        +k_stream: vector~ggml_tensor*~
+        +v_stream: vector~ggml_tensor*~
+    }
+
+    llama_memory_i <|-- llama_kv_cache
+    llama_memory_i <|-- llama_kv_cache_dsa
+    llama_memory_i <|-- llama_kv_cache_iswa
+    llama_memory_context_i <|-- llama_kv_cache_context
+    llama_memory_context_i <|-- llama_kv_cache_dsa_context
+    llama_memory_context_i <|-- llama_kv_cache_iswa_context
+    llama_kv_cache *-- "1..*" kv_layer
+    llama_kv_cache *-- "1..*" llama_kv_cells
+    llama_kv_cache *-- "1" slot_info
+    llama_kv_cells *-- "1..*" llama_kv_cell_ext
+    llama_kv_cache_dsa *-- "2" llama_kv_cache
+    llama_kv_cache_iswa *-- "2" llama_kv_cache
+    llama_kv_cache_dsa_context *-- "2" llama_kv_cache_context
+    llama_kv_cache_iswa_context *-- "2" llama_kv_cache_context

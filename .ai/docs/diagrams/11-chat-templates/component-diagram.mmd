@@ -1,0 +1,158 @@
+graph TB
+    %% ============================================================================
+    %% 11-Chat-Templates Component Diagram
+    %% Subsystems, their boundaries, and connections
+    %% ============================================================================
+
+    %% ---------- Styles ----------
+    classDef boundary fill:#f9f9f9,stroke:#666,stroke-width:2px,stroke-dasharray:5 5
+    classDef subsystem fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef data_store fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef external fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    classDef internal fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1px
+    classDef api fill:#ffebee,stroke:#c62828,stroke-width:2px
+
+    %% ---------- Boundary ----------
+    subgraph "llama.cpp Chat Templates Feature"
+        direction TB
+
+        %% ---- Public API Layer ----
+        subgraph PublicAPI["1. Public API Layer"]
+            direction TB
+            CPIA[llama_chat_apply_template<br/>include/llama.h:1186]
+            CPIB[llama_chat_builtin_templates<br/>include/llama.h:1195]
+            CPIC[llama_chat_message<br/>include/llama.h:436]
+        end
+        class PublicAPI api
+
+        %% ---- Common Chat Module ----
+        subgraph CCM["2. Common Chat Module (common/chat.h/.cpp)"]
+            direction TB
+            TYPES[Message Types<br/>common_chat_msg … ch:81<br/>common_chat_tool_call … ch:28<br/>common_chat_msg_content_part … ch:38]
+            TMPL[Template Management<br/>common_chat_template … ch:52<br/>common_chat_templates … cpp:334<br/>common_chat_templates_inputs … ch:249<br/>common_chat_params … ch:269]
+            INIT[Template Init<br/>common_chat_templates_init<br/>chat.cpp:707]
+            APPLY[Template Apply<br/>common_chat_templates_apply<br/>chat.cpp:2671]
+            DIRECT[Direct Apply<br/>common_chat_template_direct_apply_impl<br/>chat.cpp:883]
+            GENPROMPT[Gen Prompt Diff<br/>common_chat_template_generation_prompt_impl<br/>chat.cpp:941]
+            PARSE[PEG Output Parse<br/>common_chat_peg_parse<br/>chat.cpp:2684]
+            FORMAT_SINGLE[Format Single Message<br/>common_chat_format_single<br/>chat.cpp:607]
+            SPECIALIZED[Specialized Model Handlers<br/>common_chat_try_specialized_template<br/>chat.cpp:2389]
+            WORKAROUNDS[Template Workarounds<br/>system_message_not_supported, map_developer_role_to_system,<br/>requires_non_null_content, func_args_not_string,<br/>convert_tool_responses_gemma4<br/>chat.cpp:2174-2377]
+            MESSAGES_IO[Messages JSON I/O<br/>common_chat_msgs_parse_oaicompat … cpp:370<br/>render_message_to_json … cpp:471<br/>common_chat_tools_parse_oaicompat … cpp:530]
+        end
+        class CCM subsystem
+
+        %% ---- Jinja Engine ----
+        subgraph JINJA["3. Jinja Engine (common/jinja/)"]
+            direction TB
+            LEXER[Lexer<br/>jinja::lexer::tokenize<br/>lexer.h:149]
+            PARSER[Parser<br/>jinja::parse_from_tokens<br/>parser.h:14]
+            RUNTIME[Runtime<br/>jinja::runtime::execute<br/>runtime.h:627]
+            CTX[Context<br/>jinja::context<br/>runtime.h:50]
+            VALUE[Value System<br/>jinja::value_t / value_string / etc.<br/>value.h:106]
+            STRING[Provenance String<br/>jinja::string / string_part<br/>string.h:16-59]
+            CAPS[Capability Detector<br/>jinja::caps / caps_get<br/>caps.h:10]
+            AST[AST Nodes<br/>program, if_statement, for_statement,<br/>binary_expression, filter_expression, …<br/>runtime.h:105-578]
+        end
+        class JINJA subsystem
+
+        %% ---- PEG Auto Parser ----
+        subgraph AUTOPARSER["4. PEG Auto Parser (common/)"]
+            direction TB
+            AUTOPARSER_H[Autoparser Types<br/>autoparser, generation_params,<br/>analyze_base + subclasses<br/>chat-auto-parser.h:48-421]
+            DIFF_ANALYZER[Differential Analyzer<br/>autoparser::analyze_template<br/>chat-diff-analyzer.cpp]
+            GENERATOR[Parser Generator<br/>peg_generator::generate_parser<br/>chat-auto-parser-generator.cpp:33]
+            HELPERS[Diff Helpers<br/>calculate_diff_split, segmentize_markers,<br/>compare_variants, apply_template<br/>chat-auto-parser-helpers.cpp]
+        end
+        class AUTOPARSER subsystem
+
+        %% ---- PEG Parser Infrastructure ----
+        subgraph PEGPARSER["5. PEG Parser Infrastructure (common/)"]
+            direction TB
+            PEG_BASE[Base PEG Parser<br/>common_peg_parser_builder / common_peg_parser<br/>peg-parser.h]
+            PEG_BUILDER[Chat PEG Builder<br/>common_chat_peg_builder<br/>chat-peg-parser.h:46]
+            PEG_MAPPER[AST Mappers<br/>common_chat_peg_mapper<br/>common_chat_peg_gemma4_mapper<br/>chat-peg-parser.h:10-41]
+        end
+        class PEGPARSER subsystem
+
+        %% ---- Template Registry (model metadata) ----
+        subgraph REGISTRY["6. Template Registry"]
+            direction TB
+            MODEL_META[Model Metadata<br/>llama_model_chat_template(model, nullptr)<br/>llama_model_chat_template(model, "tool_use")<br/>src/llama.cpp]
+            CHATML_FALLBACK[ChatML Hardcoded Fallback<br/>CHATML_TEMPLATE_SRC<br/>chat.cpp:658-664]
+            FILE_OVERRIDE[File / CLI Override<br/>--chat-template / --chat-template-file<br/>examples/main/]
+        end
+        class REGISTRY data_store
+
+        %% ---- External Callers ----
+        subgraph CALLERS["7. External Callers"]
+            direction TB
+            SERVER[llama-server<br/>tools/server/<br/>server-common.cpp:1091<br/>server-context.cpp:1497]
+            CLI[CLI main example<br/>examples/main/]
+            SIMPLE[simple-chat example<br/>examples/simple-chat/simple-chat.cpp]
+            ANDROID[Android app<br/>examples/llama.android/]
+            DIFFUSION[Diffusion CLI<br/>examples/diffusion/diffusion-cli.cpp]
+        end
+        class CALLERS external
+    end
+    class boundary boundary
+
+    %% ---------- Connections ----------
+    CALLERS -->|"common_chat_templates_init()"| INIT
+    CALLERS -->|"common_chat_templates_apply()"| APPLY
+    CALLERS -->|"llama_chat_apply_template()"| CPIA
+
+    APPLY -->|"add_bos/add_eos"| INIT
+    APPLY -->|"use_jinja? true/false"| APPLY
+
+    APPLY -.->|"Jinja path"| DIRECT
+    APPLY -.->|"Legacy path"| CPIA
+
+    INIT -->|"reads template source"| MODEL_META
+    INIT -->|"fallback"| CHATML_FALLBACK
+    INIT -->|"lex + parse + caps"| LEXER
+    LEXER --> PARSER -->|"jinja::program"| CAPS
+    INIT ----->|"compiled template"| APPLY
+
+    DIRECT -->|"context creation"| CTX
+    DIRECT -->|"runtime.execute(prog)"| RUNTIME
+    CTX ----> VALUE
+    VALUE ----> STRING
+    RUNTIME -->|"gather_string_parts"| STRING
+
+    GENPROMPT -->|"diff computation"| DIRECT
+
+    SPECIALIZED -->|"produces"| PEG_BUILDER
+    SPECIALIZED -->|"per-model PEG + grammar"| APPLY
+
+    APPLY -->|"auto parser path"| DIFF_ANALYZER
+    DIFF_ANALYZER -->|"apply_template probe"| DIRECT
+    DIFF_ANALYZER -->|"compare_variants"| HELPERS
+    DIFF_ANALYZER -->|"populated autoparser"| GENERATOR
+    GENERATOR -->|"peg_generator"| PEG_BUILDER
+    GENERATOR -->|"build grammar"| PEG_BASE
+    PEG_BUILDER --> PEG_BASE
+
+    DIRECT ---->|"rendered prompt"| APPLY
+    PEG_BUILDER -->|"serialized arena"| GENERATOR
+    GENERATOR -->|"common_chat_params"| APPLY
+
+    PARSE -->|"uses saved parser"| PEG_BUILDER
+    PARSE -->|"maps AST to msg"| PEG_MAPPER
+    PARSE -->|"GBNF grammar for tools"| PEG_BASE
+
+    MESSAGES_IO -->|"JSON<->common_chat_msg"| APPLY
+    WORKAROUNDS -->|"pre-processing"| APPLY
+    FORMAT_SINGLE -->|"diff formatting"| DIRECT
+
+    %% Style the Legend
+    subgraph Legend
+        L1[Public API]
+        L2[Subsystem]
+        L3[Data Store]
+        L4[External Caller]
+    end
+    class L1 api
+    class L2 subsystem
+    class L3 data_store
+    class L4 external

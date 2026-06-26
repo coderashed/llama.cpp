@@ -1,0 +1,240 @@
+---
+title: Core Inference Engine -- Class/Struct Diagram
+---
+
+classDiagram
+    class llama_batch {
+        +int32_t n_tokens
+        +llama_token* token
+        +float* embd
+        +llama_pos* pos
+        +int32_t* n_seq_id
+        +llama_seq_id** seq_id
+        +int8_t* logits
+    }
+    note for llama_batch "include/llama.h:240"
+
+    class llama_batch_allocr {
+        +bool init(batch, vocab, memory, n_embd, n_seq_max, output_all)
+        +llama_ubatch split_simple(n_ubatch)
+        +llama_ubatch split_equal(n_ubatch, sequential)
+        +llama_ubatch split_seq(n_ubatch)
+        +llama_ubatch ubatch_reserve(n_seq_tokens, n_seqs)
+        -llama_batch batch
+        -vector~llama_pos~ pos
+        -vector~int32_t~ n_seq_id
+        -vector~llama_seq_id*~ seq_id
+        -vector~int8_t~ output
+        -vector~int32_t~ out_ids
+        -uint32_t n_outputs
+        -uint32_t n_used
+    }
+    note for llama_batch_allocr "src/llama-batch.h:72"
+
+    class llama_ubatch {
+        +uint32_t n_tokens
+        +uint32_t n_seq_tokens
+        +uint32_t n_seqs
+        +uint32_t n_seqs_unq
+        +uint32_t n_pos
+        +llama_token* token
+        +float* embd
+        +llama_pos* pos
+        +int32_t* n_seq_id
+        +llama_seq_id** seq_id
+        +llama_seq_id* seq_id_unq
+        +int32_t* seq_idx
+        +int8_t* output
+        +shared_ptr~data_t~ data
+    }
+    note for llama_ubatch "src/llama-batch.h:15"
+
+    class llama_cparams {
+        +uint32_t n_ctx
+        +uint32_t n_ctx_seq
+        +uint32_t n_batch
+        +uint32_t n_ubatch
+        +uint32_t n_seq_max
+        +float rope_freq_base
+        +float rope_freq_scale
+        +bool embeddings
+        +bool causal_attn
+        +bool flash_attn
+        +enum pooling_type
+        +enum ctx_type
+    }
+    note for llama_cparams "src/llama-cparams.h:10"
+
+    class llama_hparams {
+        +uint32_t n_embd
+        +uint32_t n_layer
+        +uint32_t n_head()
+        +uint32_t n_head_kv()
+        +uint32_t n_ff()
+        +uint32_t n_embd_inp()
+        +uint32_t n_expert
+        +uint32_t n_expert_used
+        +float f_norm_eps
+        +float f_norm_rms_eps
+        +enum rope_type
+        +bool causal_attn
+    }
+    note for llama_hparams "src/llama-hparams.h:39"
+
+    class llama_model {
+        +llm_type type
+        +llm_arch arch
+        +llama_hparams hparams
+        +llama_vocab vocab
+        +ggml_tensor* tok_embd
+        +ggml_tensor* output_norm
+        +ggml_tensor* output
+        +vector~llama_layer~ layers
+        +vector~llama_device~ devices
+        +ggml_cgraph* build_graph(params)
+        +create_memory(params, cparams)
+        +build_arch_graph(params)*
+    }
+    note for llama_model "src/llama-model.h:522"
+
+    class llama_layer {
+        +ggml_tensor* attn_norm
+        +ggml_tensor* ffn_norm
+        +ggml_tensor* wq, wk, wv, wo
+        +ggml_tensor* ffn_gate, ffn_up, ffn_down
+        +ggml_tensor* ffn_gate_inp (MoE)
+        +ggml_tensor* ffn_up_exps, ffn_gate_exps, ffn_down_exps
+        +ggml_tensor* ssm_in, ssm_x, ssm_dt, ssm_out
+        +ggml_tensor* ssm_conv1d, ssm_a, ssm_d
+    }
+    note for llama_layer "src/llama-model.h:223"
+
+    class llama_context {
+        +llama_context(model, params)
+        +void sched_reserve()
+        +int decode(batch)
+        +int encode(batch)
+        +llm_graph_result* process_ubatch(ubatch, gtype, mctx, ret)
+        -const llama_model& model
+        -llama_cparams cparams
+        -llama_memory_ptr memory
+        -ggml_backend_sched_ptr sched
+        -buffer_view~float~ logits
+        -buffer_view~float~ embd
+        -map~llama_seq_id,vector~float~~ embd_seq
+        -unique_ptr~llama_batch_allocr~ balloc
+        -vector~int32_t~ output_ids
+        -llm_graph_result_ptr gf_res_prev
+        -llm_graph_result_ptr gf_res_reserve
+        -sampling_info sampling
+        -llama_adapter_cvec_ptr cvec
+        -llama_adapter_loras_ptr loras
+        -llama_cross cross
+        -ggml_backend_buffer_ptr buf_output
+    }
+    note for llama_context "src/llama-context.h:42"
+
+    class llama_memory_i {
+        <<interface>>
+        +init_batch(balloc, n_ubatch, embd_all)*
+        +init_full()*
+        +init_update(lctx, optimize)*
+        +seq_rm(seq_id, p0, p1)*
+        +seq_cp(src, dst, p0, p1)*
+        +seq_add(seq_id, p0, p1, delta)*
+        +seq_pos_min(seq_id)*
+        +seq_pos_max(seq_id)*
+    }
+    note for llama_memory_i "src/llama-memory.h:73"
+
+    class llama_kv_cache {
+        +slot_info find_slot(ubatch, cont)
+        +slot_info_vec_t prepare(ubatches)
+        +void apply_ubatch(sinfo, ubatch)
+        +ggml_tensor* cpy_k(ctx, k_cur, k_idxs, il, sinfo)
+        +ggml_tensor* cpy_v(ctx, v_cur, v_idxs, il, sinfo)
+        +ggml_tensor* get_k(ctx, il, n_kv, sinfo)
+        +ggml_tensor* get_v(ctx, il, n_kv, sinfo)
+        -vector~llama_kv_cells~ v_cells
+        -vector~uint32_t~ v_heads
+        -vector~uint32_t~ seq_to_stream
+        -uint32_t n_swa
+    }
+    note for llama_kv_cache "src/llama-kv-cache.h:20"
+
+    class llm_graph_result {
+        +ggml_tensor* t_inp_tokens
+        +ggml_tensor* t_inp_embd
+        +ggml_tensor* t_logits
+        +ggml_tensor* t_embd
+        +ggml_tensor* t_embd_pooled
+        +ggml_tensor* t_h_nextn
+        +vector~ggml_tensor*~ t_layer_inp
+        +ggml_cgraph* gf
+        +ggml_context* ctx_compute
+        +vector~llm_graph_input_ptr~ inputs
+        +void set_inputs(ubatch)
+        +void set_outputs(params)
+        +bool can_reuse(params)
+        +void reset()
+    }
+    note for llm_graph_result "src/llama-graph.h:703"
+
+    class llm_graph_context {
+        +const llm_arch arch
+        +const llama_hparams& hparams
+        +const llama_cparams& cparams
+        +const llama_ubatch& ubatch
+        +ggml_context* ctx0
+        +ggml_cgraph* gf
+        +ggml_tensor* build_inp_embd(tok_embd)
+        +ggml_tensor* build_inp_pos()
+        +llm_graph_qkv build_qkv(layer, cur, ...)
+        +ggml_tensor* build_ffn(cur, up, gate, down, ...)
+        +ggml_tensor* build_moe_ffn(cur, ...)
+        +ggml_tensor* build_attn(inp, wo, q, k, v, ...)
+        +ggml_tensor* build_attn_mha(q, k, v, kq_mask, ...)
+        +ggml_tensor* build_norm(cur, mw, mb, type, il)
+        +ggml_tensor* build_cvec(cur, il)
+        +void build_pooling(cls, cls_b, cls_out, ...)
+        +void build_sampling()
+        +void build_dense_out(dense_2, dense_3)
+    }
+    note for llm_graph_context "src/llama-graph.h:789"
+
+    class llm_graph_params {
+        +llm_arch arch
+        +llama_hparams hparams
+        +llama_cparams cparams
+        +llama_ubatch ubatch
+        +llm_graph_type gtype
+        +ggml_backend_sched_t sched
+        +const llama_adapter_cvec* cvec
+        +const llama_adapter_loras* loras
+        +const llama_memory_context_i* mctx
+        +map~seq_id, sampler*~ samplers
+        +uint32_t n_outputs
+        +llm_graph_cb cb
+        +llm_graph_result* res
+        +bool allow_reuse(other)
+    }
+    note for llm_graph_params "src/llama-graph.h:588"
+
+    llama_context --> llama_model : model ref
+    llama_context --> llama_cparams : cparams
+    llama_context --> llama_memory_i : memory
+    llama_context --> llama_batch_allocr : balloc
+    llama_context --> llm_graph_result : gf_res_prev
+    llama_context --> llm_graph_result : gf_res_reserve
+    llama_context ..> llm_graph_params : creates
+    llama_model --> llama_hparams : hparams
+    llama_model --> llama_layer : layers[]
+    llama_model --> llm_graph_context : build_arch_graph() returns
+    llama_model --> llm_graph_result : build_graph() fills
+    llm_graph_context --> llm_graph_result : res
+    llm_graph_context --> llm_graph_params : built from
+    llm_graph_result --> llm_graph_params : stored for reuse check
+    llama_memory_i <|-- llama_kv_cache : implements
+    llama_kv_cache --> llama_ubatch : processes
+    llama_batch_allocr --> llama_batch : sanitizes
+    llama_batch_allocr --> llama_ubatch : produces

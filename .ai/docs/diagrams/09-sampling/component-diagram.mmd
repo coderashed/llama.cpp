@@ -1,0 +1,124 @@
+graph TB
+    subgraph Public_API["Public API — include/llama.h"]
+        API_SAMPLE["llama_sampler_sample()<br/>include/llama.h:1491<br/>src/llama-sampler.cpp:806"]
+        API_CHAIN["llama_sampler_chain_init()<br/>include/llama.h:1299<br/>src/llama-sampler.cpp:792"]
+        API_CHAIN_ADD["llama_sampler_chain_add()<br/>include/llama.h:1302<br/>src/llama-sampler.cpp:876"]
+        API_NAME["llama_sampler_name()<br/>include/llama.h:1288"]
+        API_APPLY["llama_sampler_apply()<br/>include/llama.h:1290<br/>src/llama-sampler.cpp:378"]
+        API_ACCEPT["llama_sampler_accept()<br/>include/llama.h:1289<br/>src/llama-sampler.cpp:360"]
+        API_RESET["llama_sampler_reset()<br/>include/llama.h:1291<br/>src/llama-sampler.cpp:387"]
+        API_METRICS["llama_perf_sampler()<br/>include/llama.h:1548<br/>src/llama-sampler.cpp:3853"]
+
+        subgraph Init_Functions["Sampler Init Functions — include/llama.h:1317-1476"]
+            INIT_GREEDY["llama_sampler_init_greedy()<br/>line 1319"]
+            INIT_DIST["llama_sampler_init_dist()<br/>line 1322"]
+            INIT_TOP_K["llama_sampler_init_top_k()<br/>line 1326"]
+            INIT_TOP_P["llama_sampler_init_top_p()<br/>line 1329"]
+            INIT_MIN_P["llama_sampler_init_min_p()<br/>line 1332"]
+            INIT_TYPICAL["llama_sampler_init_typical()<br/>line 1335"]
+            INIT_TEMP["llama_sampler_init_temp()<br/>line 1338"]
+            INIT_TEMP_EXT["llama_sampler_init_temp_ext()<br/>line 1341"]
+            INIT_XTC["llama_sampler_init_xtc()<br/>line 1344"]
+            INIT_TOP_N_SIGMA["llama_sampler_init_top_n_sigma()<br/>line 1347"]
+            INIT_MIROSTAT["llama_sampler_init_mirostat()<br/>line 1355"]
+            INIT_MIROSTAT_V2["llama_sampler_init_mirostat_v2()<br/>line 1367"]
+            INIT_GRAMMAR["llama_sampler_init_grammar()<br/>line 1376"]
+            INIT_GRAMMAR_LAZY["llama_sampler_init_grammar_lazy_patterns()<br/>line 1395"]
+            INIT_PENALTIES["llama_sampler_init_penalties()<br/>line 1406"]
+            INIT_DRY["llama_sampler_init_dry()<br/>line 1413"]
+            INIT_ADAPTIVE_P["llama_sampler_init_adaptive_p()<br/>line 1445"]
+            INIT_LOGIT_BIAS["llama_sampler_init_logit_bias()<br/>line 1450"]
+            INIT_INFILL["llama_sampler_init_infill()<br/>line 1476"]
+        end
+    end
+
+    subgraph Core_Implementation["Core Implementation — src/llama-sampler.cpp"]
+        IMPL_CHAIN["Sampler Chain<br/>llama_sampler_chain struct<br/>src/llama-sampler.h:12-34"]
+
+        subgraph Samplers_CPU["CPU-only Samplers"]
+            TYPICAL["typical<br/>line 1687"]
+            MIROSTAT_V1["mirostat v1<br/>line 2212"]
+            MIROSTAT_V2["mirostat v2<br/>line 2327"]
+            XTC["xtc<br/>line 2103"]
+            PENALTIES["penalties<br/>line 2622"]
+            DRY["dry<br/>line 2857"]
+            ADAPTIVE_P["adaptive-p<br/>line 3269"]
+            INFILL["infill<br/>line 3596"]
+            TOP_N_SIGMA["top-n-sigma<br/>line 2771"]
+            GRAMMAR["grammar<br/>line 2428"]
+        end
+
+        subgraph Samplers_GPU["GPU-capable Samplers (llama_sampler_backend)"]
+            GREEDY["greedy<br/>line 931"]
+            DIST["dist<br/>line 1022"]
+            TOP_K["top-k<br/>line 1246"]
+            TOP_P["top-p<br/>line 1339"]
+            MIN_P["min-p<br/>line 1533"]
+            TEMP["temp<br/>line 1798"]
+            TEMP_EXT["temp-ext<br/>line 1902"]
+            LOGIT_BIAS["logit-bias<br/>line 3426"]
+        end
+    end
+
+    subgraph Backend_Integration["Backend Integration — src/llama-context.cpp"]
+        CONTEXT_SAMPLER["set_sampler()<br/>line 115-129"]
+        CONTEXT_PARAMS["llama_context_params.samplers<br/>include/llama.h:387-390"]
+    end
+
+    subgraph Common_Wrapper["Common Sampling Wrapper — common/sampling.h + common/sampling.cpp"]
+        COMMON_SAMPLER["common_sampler struct<br/>common/sampling.cpp:111-169"]
+        COMMON_INIT["common_sampler_init()<br/>common/sampling.cpp:187"]
+        COMMON_SAMPLE["common_sampler_sample()<br/>common/sampling.cpp:540"]
+        COMMON_SAMPLE_N["common_sampler_sample_and_accept_n()<br/>common/sampling.cpp:624"]
+        COMMON_ACCEPT["common_sampler_accept()<br/>common/sampling.h:45"]
+        COMMON_CANDIDATES["common_sampler_get_candidates()<br/>common/sampling.h:98"]
+    end
+
+    subgraph Speculative["Speculative Decoding — common/speculative.cpp"]
+        SPEC_SAMPLE["calls common_sampler_sample()<br/>speculative.cpp:311,765,1236"]
+    end
+
+    subgraph Grammar_Engine["Grammar Engine — src/llama-grammar.h/.cpp"]
+        GRAMMAR_APPLY["llama_grammar_apply_impl()<br/>masks token logits"]
+        GRAMMAR_ACCEPT["llama_grammar_accept_impl()<br/>advances state machine"]
+    end
+
+    subgraph Testing["Testing"]
+        TEST_SAMPLING["test-sampling.cpp<br/>unit tests"]
+        TEST_BACKEND["test-backend-sampler.cpp<br/>GPU sampler tests"]
+    end
+
+    subgraph Token_Data["Data Types"]
+        TOKEN_DATA["llama_token_data<br/>{ id, logit, p }<br/>include/llama.h:207-211"]
+        TOKEN_DATA_ARRAY["llama_token_data_array<br/>{ data, size, selected, sorted }<br/>include/llama.h:213-223"]
+        SAMPLER_CHAIN_PARAMS["llama_sampler_chain_params<br/>{ no_perf }<br/>include/llama.h:431-433"]
+    end
+
+    API_SAMPLE -->|reads logits from| CONTEXT_PARAMS
+    API_SAMPLE -->|calls apply on| IMPL_CHAIN
+    IMPL_CHAIN -->|contains| Samplers_CPU
+    IMPL_CHAIN -->|contains| Samplers_GPU
+    CONTEXT_SAMPLER -->|installs backend| IMPL_CHAIN
+    CONTEXT_PARAMS -->|configured via| CONTEXT_SAMPLER
+    COMMON_SAMPLE -->|uses| API_SAMPLE
+    COMMON_SAMPLE -->|validates with| GRAMMAR
+    GRAMMAR -->|calls| GRAMMAR_APPLY
+    GRAMMAR -->|calls| GRAMMAR_ACCEPT
+    COMMON_SAMPLE_N -->|used by| SPEC_SAMPLE
+    COMMON_INIT -->|builds| IMPL_CHAIN
+    INIT_FUNCTIONS -->|create instances of| Samplers_CPU
+    INIT_FUNCTIONS -->|create instances of| Samplers_GPU
+    TEST_SAMPLING -->|tests| Samplers_CPU
+    TEST_BACKEND -->|tests| Samplers_GPU
+    API_METRICS -->|timing from| IMPL_CHAIN
+    COMMON_CANDIDATES -->|exposes| TOKEN_DATA_ARRAY
+    API_SAMPLE -->|returns| TOKEN_DATA.id
+
+    style INIT_GREEDY fill:#c0e0c0
+    style INIT_DIST fill:#c0e0c0
+    style INIT_TOP_K fill:#c0e0c0
+    style INIT_TOP_P fill:#c0e0c0
+    style INIT_MIN_P fill:#c0e0c0
+    style INIT_TEMP fill:#c0e0c0
+    style INIT_TEMP_EXT fill:#c0e0c0
+    style INIT_LOGIT_BIAS fill:#c0e0c0

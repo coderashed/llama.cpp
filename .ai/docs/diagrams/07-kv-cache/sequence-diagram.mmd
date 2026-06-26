@@ -1,0 +1,106 @@
+sequenceDiagram
+    participant User as User Code
+    participant API as llama.h API
+    participant MemI as llama_memory_i
+    participant KV as llama_kv_cache
+    participant Cells as llama_kv_cells
+    participant Ctx as llama_kv_cache_context
+    participant Graph as Compute Graph
+
+    Note over User,Graph: === Phase 1: Batch Init ===
+    User->>API: llama_decode(ctx, batch)
+    API->>MemI: init_batch(balloc, n_ubatch, embd_all)
+    MemI->>KV: prepare(ubatches)
+    KV->>KV: find_slot(ubatch)
+    KV->>Cells: is_empty(idx), seq_has(idx, seq_id)
+    Cells-->>KV: cell status
+    KV->>KV: apply_ubatch(sinfo, ubatch)
+    KV->>Cells: pos_set(), seq_add()
+    KV->>Cells: rm() for overwritten cells
+    KV->>KV: seq_rm() to purge stale positions
+    KV-->>MemI: slot_info_vec_t
+    MemI-->>API: llama_memory_context_ptr
+    Ctx->>Ctx: stores sinfos + ubatches
+
+    Note over User,Graph: === Phase 2: Attention Graph Build ===
+    API->>Graph: build attention graph
+    Graph->>Ctx: get_k(ctx, il)
+    Ctx->>KV: get_k(ctx, il, n_kv, sinfo)
+    KV-->>Ctx: ggml_tensor view
+    Ctx-->>Graph: K cache view
+    Graph->>Ctx: get_v(ctx, il)
+    Ctx->>KV: get_v(ctx, il, n_kv, sinfo)
+    KV-->>Ctx: ggml_tensor view
+    Ctx-->>Graph: V cache view
+
+    Note over User,Graph: === Phase 3: Input Setup ===
+    Graph->>Ctx: set_input_k_idxs(k_idxs, ubatch)
+    Ctx->>KV: set_input_k_idxs(dst, ubatch, sinfo)
+    KV->>Cells: compute global indices from sinfo.idxs + stream offset
+    Graph->>Ctx: set_input_kq_mask(mask, ubatch, causal)
+    Ctx->>KV: set_input_kq_mask(dst, ubatch, causal)
+    KV->>Cells: check cell emptiness, seq membership, causal/SWA masking
+    Graph->>Ctx: set_input_k_rot(k_rot)
+    Ctx->>KV: set_input_k_rot(dst) // Hadamard matrix for quantized K
+
+    Note over User,Graph: === Phase 4: Compute & Apply ===
+    Graph->>Graph: ggml_backend_graph_compute
+    Graph->>Ctx: cpy_k(ctx, k_cur, k_idxs, il)
+    Ctx->>KV: cpy_k(ctx, k_cur, k_idxs, il, sinfo)
+    KV->>KV: ggml_set_rows(cache_k, k_cur, k_idxs)
+    Graph->>Ctx: cpy_v(ctx, v_cur, v_idxs, il)
+    Ctx->>KV: cpy_v(ctx, v_cur, v_idxs, il, sinfo)
+    KV->>KV: ggml_set_rows(cache_v, v_cur, v_idxs)
+    Ctx-->>Graph: store computed K/V into cache
+
+    Note over User,Graph: === Phase 5: Apply Ubatch ===
+    API->>Ctx: apply()
+    Ctx->>KV: apply_ubatch(sinfo, ubatch)
+    KV->>Cells: pos_set, seq_add, rm overwritten
+
+    Note over User,Graph: === Phase 6: Update (shifts/copies) ===
+    API->>MemI: init_update(lctx, optimize)
+    MemI->>KV: init_update(lctx, optimize)
+    KV->>KV: get_has_shift() ? do_shift = true : false
+    KV-->>MemI: llama_kv_cache_context(with do_shift + sc_info)
+    MemI-->>API: context ptr
+    API->>Ctx: apply()
+    Ctx->>KV: update(lctx, do_shift, sc_info)
+
+    alt has stream copies
+        KV->>KV: ggml_backend_tensor_copy per layer
+    end
+
+    alt has K-shift
+        KV->>KV: build_graph_shift(res, lctx)
+        KV->>Graph: RoPE shift on cache K tensors
+        KV->>Cells: reset_shift()
+    end
+
+    Note over User,Graph: === Sequence Management ===
+    User->>API: llama_memory_seq_rm(mem, seq, p0, p1)
+    API->>MemI: seq_rm(seq, p0, p1)
+    MemI->>KV: seq_rm(seq, p0, p1)
+    KV->>Cells: seq_rm(i, seq_id) for matching cells
+    KV->>KV: update v_heads
+
+    User->>API: llama_memory_seq_cp(mem, src, dst, p0, p1)
+    API->>MemI: seq_cp(src, dst, p0, p1)
+    MemI->>KV: seq_cp(src, dst, p0, p1)
+    alt same stream
+        KV->>Cells: seq_add(i, dst) for matching cells
+    else cross stream
+        KV->>KV: enqueue stream_copy_info
+        KV->>Cells: copy metadata + pos_set
+    end
+
+    User->>API: llama_memory_seq_add(mem, seq, p0, p1, delta)
+    API->>MemI: seq_add(seq, p0, p1, delta)
+    MemI->>KV: seq_add(seq, p0, p1, delta)
+    KV->>Cells: pos_add(i, delta) for matching cells
+    Note over Cells: sets has_shift = true
+
+    User->>API: llama_memory_seq_keep(mem, seq)
+    API->>MemI: seq_keep(seq)
+    MemI->>KV: seq_keep(seq)
+    KV->>Cells: seq_keep(i, seq) for all cells

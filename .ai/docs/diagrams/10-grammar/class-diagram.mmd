@@ -1,0 +1,137 @@
+classDiagram
+    class llama_grammar {
+        +const llama_vocab* vocab
+        +llama_grammar_rules rules
+        +llama_grammar_stacks stacks
+        +llama_partial_utf8 partial_utf8
+        +bool lazy
+        +bool awaiting_trigger
+        +string trigger_buffer
+        +vector~token_pos~ trigger_buffer_positions
+        +vector~llama_token~ trigger_tokens
+        +vector~llama_grammar_trigger_pattern~ trigger_patterns
+    }
+    note for llama_grammar "src/llama-grammar.h:126"
+
+    class llama_grammar_parser {
+        +const llama_vocab* vocab
+        +map~string,uint32_t~ symbol_ids
+        +llama_grammar_rules rules
+        +parse(src) bool
+        +parse_rule(src) const char*
+        +parse_alternates(...) const char*
+        +parse_sequence(...) const char*
+        +c_rules() llama_grammar_stack
+    }
+    note for llama_grammar_parser "src/llama-grammar.h:86"
+
+    class llama_grammar_element {
+        +llama_gretype type
+        +uint32_t value
+    }
+    note for llama_grammar_element "src/llama-grammar.h:47"
+
+    class llama_grammar_candidate {
+        +size_t index
+        +const uint32_t* code_points
+        +llama_partial_utf8 partial_utf8
+        +llama_token id
+    }
+    note for llama_grammar_candidate "src/llama-grammar.h:57"
+
+    class llama_partial_utf8 {
+        +uint32_t value
+        +int n_remain
+    }
+    note for llama_partial_utf8 "src/llama-grammar.h:52"
+
+    class llama_grammar_trigger_pattern {
+        +string pattern
+        +regex regex
+        +find(input) size_t
+    }
+    note for llama_grammar_trigger_pattern "src/llama-grammar.h:119"
+
+    class llama_sampler_grammar {
+        +const llama_vocab* vocab
+        +string grammar_str
+        +string grammar_root
+        +llama_grammar* grammar
+    }
+    note for llama_sampler_grammar "src/llama-sampler.cpp:2428"
+
+    class common_schema_converter {
+        -map~string,string~ _rules
+        -unordered_map~string,json~ _refs
+        -vector~string~ _errors
+        +visit(schema, name) string
+        +format_grammar() string
+        +resolve_refs(schema, url) void
+    }
+    note for common_schema_converter "common/json-schema-to-grammar.cpp:312"
+
+    class common_schema_info {
+        +resolve_refs(schema) void
+        +resolves_to_string(schema) bool
+    }
+    note for common_schema_info "common/json-schema-to-grammar.h:15"
+
+    class common_peg_arena {
+        -vector~common_peg_parser_variant~ parsers_
+        -unordered_map~string,common_peg_parser_id~ rules_
+        -common_peg_parser_id root_
+        +parse(ctx, start) common_peg_parse_result
+        +build_grammar(builder, lazy) void
+        +to_json() json
+        +from_json(json) common_peg_arena
+    }
+    note for common_peg_arena "common/peg-parser.h:308"
+
+    class common_peg_parser_builder {
+        +eps() common_peg_parser
+        +literal(str) common_peg_parser
+        +sequence(parsers) common_peg_parser
+        +choice(parsers) common_peg_parser
+        +zero_or_more(p) common_peg_parser
+        +one_or_more(p) common_peg_parser
+        +optional(p) common_peg_parser
+        +chars(classes) common_peg_parser
+        +rule(name, p) common_peg_parser
+        +schema(p, name, schema) common_peg_parser
+        +json() common_peg_parser
+        +build() common_peg_arena
+    }
+    note for common_peg_parser_builder "common/peg-parser.h:352"
+
+    class llama_sampler_llg {
+        +const llama_vocab* vocab
+        +string grammar_kind
+        +string grammar_data
+        +LlgTokenizer* tokenizer
+        +LlgMatcher* grammar
+    }
+    note for llama_sampler_llg "common/llguidance.cpp:9"
+
+    class common_grammar {
+        +common_grammar_type type
+        +string grammar
+    }
+    note for common_grammar "common/common.h:182"
+
+    class common_grammar_trigger {
+        +common_grammar_trigger_type type
+        +string value
+        +llama_token token
+    }
+    note for common_grammar_trigger "common/common.h:139"
+
+    llama_grammar *--> llama_grammar_element : contains
+    llama_grammar *--> llama_grammar_trigger_pattern : contains
+    llama_grammar *--> llama_partial_utf8 : contains
+    llama_sampler_grammar *--> llama_grammar : wraps
+    llama_grammar_parser --> llama_grammar_element : produces rules of
+    llama_grammar_candidate --> llama_partial_utf8 : contains
+    common_schema_converter --> common_grammar : produces
+    common_peg_arena --> common_grammar : builds
+    llama_sampler_grammar --> common_grammar : initialized from
+    llama_sampler_llg --> llama_sampler_grammar : alternative to

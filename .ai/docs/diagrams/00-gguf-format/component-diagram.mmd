@@ -1,0 +1,81 @@
+flowchart LR
+    subgraph cpp_reader ["C++ Reader (ggml/src/gguf.cpp)"]
+        R_parse["gguf_init_from_file<br/>ggml/src/gguf.cpp:979"]
+        R_read["gguf_init_from_reader<br/>ggml/src/gguf.cpp:451"]
+        R_read --> R_validate["validate magic/version<br/>ggml/src/gguf.cpp:456-510"]
+        R_read --> R_kv["read KV pairs<br/>ggml/src/gguf.cpp:544-607"]
+        R_read --> R_ti["read tensor info<br/>ggml/src/gguf.cpp:620-742"]
+        R_read --> R_data["load data blob<br/>ggml/src/gguf.cpp:785-891"]
+    end
+
+    subgraph cpp_writer ["C++ Writer (ggml/src/gguf.cpp)"]
+        W_entry["gguf_write_to_file / gguf_write_to_file_ptr<br/>ggml/src/gguf.cpp:1660 / 1647"]
+        W_out["gguf_write_out (template)<br/>ggml/src/gguf.cpp:1603"]
+        W_base["gguf_writer_base<br/>ggml/src/gguf.cpp:1415"]
+        W_buf["gguf_writer_buf (vector)<br/>ggml/src/gguf.cpp:1522"]
+        W_file["gguf_writer_file (FILE*)<br/>ggml/src/gguf.cpp:1560"]
+        W_out --> W_base
+        W_buf --|> W_base
+        W_file --|> W_base
+        W_out -.-> W_buf
+        W_out -.-> W_file
+    end
+
+    subgraph py_reader ["Python gguf-py Reader (gguf-py/gguf/gguf_reader.py)"]
+        PY_R["GGUFReader.__init__<br/>gguf-py/gguf/gguf_reader.py:132"]
+        PY_R --> PY_R_magic["parse magic + version<br/>gguf-py/gguf/gguf_reader.py:136-162"]
+        PY_R --> PY_R_fields["_build_fields (KV)<br/>gguf-py/gguf/gguf_reader.py:289"]
+        PY_R --> PY_R_ti["_build_tensor_info<br/>gguf-py/gguf/gguf_reader.py:310"]
+        PY_R --> PY_R_t["_build_tensors<br/>gguf-py/gguf/gguf_reader.py:318"]
+    end
+
+    subgraph py_writer ["Python gguf-py Writer (gguf-py/gguf/gguf_writer.py)"]
+        PY_W["GGUFWriter<br/>gguf-py/gguf/gguf_writer.py:65"]
+        PY_W --> PY_W_hdr["write_header_to_file<br/>gguf-py/gguf/gguf_writer.py:214"]
+        PY_W --> PY_W_kv["write_kv_data_to_file<br/>gguf-py/gguf/gguf_writer.py:237"]
+        PY_W --> PY_W_ti["write_ti_data_to_file<br/>gguf-py/gguf/gguf_writer.py:254"]
+        PY_W --> PY_W_t["write_tensors_to_file<br/>gguf-py/gguf/gguf_writer.py:438"]
+        PY_W_t ----> PY_W_td["write_tensor_data<br/>gguf-py/gguf/gguf_writer.py:406"]
+    end
+
+    subgraph model_loader ["Model Loader (src/llama-model-loader.cpp)"]
+        ML["llama_model_loader::llama_model_loader<br/>src/llama-model-loader.cpp:539"]
+        ML --> ML_init["gguf_init_from_file (no_alloc=true)<br/>src/llama-model-loader.cpp:547"]
+        ML --> ML_arch["read architecture KV<br/>src/llama-model-loader.cpp:553"]
+        ML --> ML_split["load split files<br/>src/llama-model-loader.cpp:586-662"]
+        ML --> ML_map["build weights_map<br/>src/llama-model-loader.cpp:576-584"]
+    end
+
+    subgraph model_saver ["Model Saver (src/llama-model-saver.cpp)"]
+        MS["llama_model_saver<br/>src/llama-model-saver.cpp:37"]
+        MS --> MS_kv["add_kv (set metadata)<br/>src/llama-model-saver.cpp:51-383"]
+        MS --> MS_t["add_tensor / add_tensors_from_model<br/>src/llama-model-saver.cpp:131-412"]
+        MS --> MS_save["save -> gguf_write_to_file<br/>src/llama-model-saver.cpp:414-419"]
+    end
+
+    subgraph converters ["Conversion Scripts (conversion/)"]
+        CONV_BASE["ModelBase (conversion/base.py)<br/>conversion/base.py:178"]
+        CONV_HF["convert_hf_to_gguf.py<br/>convert_hf_to_gguf.py:1"]
+        CONV_BASE --> CONV_WRITE["write_header_to_file -> write_kv_data_to_file -> write_tensors_to_file<br/>conversion/base.py:1025-1027"]
+    end
+
+    GGUF_FILE(("GGUF File<br/>(.gguf)"))
+    GGUF_SPLITS(("GGUF Split Files<br/>(.gguf)"))
+
+    cpp_reader --> GGUF_FILE
+    GGUF_FILE --> cpp_reader
+    GGUF_FILE --> py_reader
+    GGUF_SPLITS --> cpp_reader
+
+    cpp_writer --> GGUF_FILE
+    py_writer --> GGUF_FILE
+    py_writer --> GGUF_SPLITS
+
+    model_loader --> cpp_reader
+    model_loader --> GGUF_FILE
+    model_loader --> GGUF_SPLITS
+
+    model_saver --> cpp_writer
+
+    converters --> py_writer
+    CONV_HF --> CONV_BASE

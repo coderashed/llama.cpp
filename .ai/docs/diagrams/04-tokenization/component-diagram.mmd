@@ -1,0 +1,175 @@
+graph TB
+    subgraph "Public C API (include/llama.h)"
+        API_Tokenize["llama_tokenize<br>(llama.h:1135)"]
+        API_ToPiece["llama_token_to_piece<br>(llama.h:1149)"]
+        API_Detokenize["llama_detokenize<br>(llama.h:1163)"]
+        API_Vocab["llama_vocab_*<br>(llama.h:1064-1094)"]
+    end
+
+    subgraph "Common Wrappers (common/common.cpp)"
+        Common_Tokenize["common_tokenize<br>(common.cpp:1664)"]
+        Common_ToPiece["common_token_to_piece<br>(common.cpp:1692)"]
+        Common_Detokenize["common_detokenize<br>(common.cpp:1708)"]
+    end
+
+    subgraph "Vocab Core (src/llama-vocab.h/.cpp)"
+        Vocab["llama_vocab<br>(llama-vocab.h:72)"]
+        Impl["llama_vocab::impl<br>(llama-vocab.cpp:1765)"]
+        TokenData["token_data<br>(llama-vocab.h:73)<br>text, score, attr"]
+        Normalizer["normalizer_options<br>(llama-vocab.h:79)"]
+        Fragment["fragment_buffer_variant<br>(llama-vocab.cpp:1736)"]
+    end
+
+    subgraph "Tokenizer Dispatcher"
+        InitTokenizer["init_tokenizer<br>(llama-vocab.cpp:3083)"]
+        STPartition["tokenizer_st_partition<br>(llama-vocab.cpp:3116)"]
+        Impl --> InitTokenizer
+        Impl --> STPartition
+    end
+
+    subgraph "SPM Tokenizer"
+        SPM_Tok["llm_tokenizer_spm<br>(llama-vocab.cpp:110)"]
+        SPM_Sess["llm_tokenizer_spm_session<br>(llama-vocab.cpp:114)"]
+        BigramSPM["llm_bigram_spm<br>(llama-vocab.cpp:96)"]
+    end
+
+    subgraph "BPE Tokenizer"
+        BPE_Tok["llm_tokenizer_bpe<br>(llama-vocab.cpp:279)<br>regex_exprs + byte_encode"]
+        BPE_Sess["llm_tokenizer_bpe_session<br>(llama-vocab.cpp:555)"]
+        BigramBPE["llm_bigram_bpe<br>(llama-vocab.cpp:263)"]
+        HybridDNA["llm_tokenizer_hybriddna_session<br>(llama-vocab.cpp:1621)"]
+        WhitespaceTok["llm_tokenizer_whitespace_session<br>(llama-vocab.cpp:1698)"]
+    end
+
+    subgraph "WPM Tokenizer"
+        WPM_Tok["llm_tokenizer_wpm<br>(llama-vocab.cpp:758)"]
+        WPM_Sess["llm_tokenizer_wpm_session<br>(llama-vocab.cpp:762)"]
+    end
+
+    subgraph "UGM Tokenizer"
+        UGM_Tok["llm_tokenizer_ugm<br>(llama-vocab.cpp:881)<br>XCDA + trie"]
+        UGM_Sess["llm_tokenizer_ugm_session<br>(llama-vocab.cpp:948)"]
+    end
+
+    subgraph "RWKV Tokenizer"
+        RWKV_Tok["llm_tokenizer_rwkv<br>(llama-vocab.cpp:1285)<br>naive_trie"]
+        RWKV_Sess["llm_tokenizer_rwkv_session<br>(llama-vocab.cpp:1301)"]
+    end
+
+    subgraph "PLaMo-2 Tokenizer"
+        PLAMO_Tok["llm_tokenizer_plamo2<br>(llama-vocab.cpp:1337)<br>DP table"]
+        PLAMO_Sess["llm_tokenizer_plamo2_session<br>(llama-vocab.cpp:1604)"]
+    end
+
+    subgraph "Helper Data Structures"
+        Symbol["llm_symbol<br>(llama-vocab.cpp:80)"]
+        Trie["naive_trie<br>(llama-vocab.cpp:28)"]
+        XCDA["xcda_array_view<br>(llama-vocab.cpp:1114)"]
+        PriorityQueueSPM["llm_bigram_spm::queue<br>(llama-vocab.cpp:103)"]
+        PriorityQueueBPE["llama_priority_queue<br>(llama-vocab.cpp:249)"]
+    end
+
+    subgraph "Unicode Subsystem (src/unicode.h/.cpp)"
+        UnicodeLen["unicode_len_utf8<br>(unicode.cpp:16)"]
+        UnicodeCPT["unicode_cpt_from/to_utf8<br>(unicode.cpp:30/94)"]
+        UnicodeCPTs["unicode_cpts_from_utf8<br>(unicode.cpp)"]
+        UnicodeNFD["unicode_cpts_normalize_nfd<br>(unicode.cpp)"]
+        UnicodeFlags["unicode_cpt_flags<br>(unicode.h:8)"]
+        UnicodeLower["unicode_tolower<br>(unicode.cpp:1174)"]
+        UnicodeByteMap["unicode_byte_to/from_utf8<br>(unicode.cpp:148-194)"]
+        UnicodeRegex["unicode_regex_split<br>(unicode.cpp:1216)"]
+        CustomGPT2["regex_split_custom_gpt2<br>(unicode.cpp:215)"]
+        CustomLLAMA3["regex_split_custom_llama3<br>(unicode.cpp:333)"]
+        CustomQWEN2["regex_split_custom_qwen2<br>(unicode.cpp:474)"]
+        CustomKimiK2["regex_split_custom_kimi_k2<br>(unicode.cpp:777)"]
+    end
+
+    subgraph "Unicode Data Tables (src/unicode-data.h/.cpp)"
+        RangeFlags["unicode_ranges_flags<br>(unicode-data.cpp:10)"]
+        WhitespaceSet["unicode_set_whitespace<br>(unicode-data.cpp:2286)"]
+        LowerMap["unicode_map_lowercase<br>(unicode-data.cpp:2315)"]
+        UpperMap["unicode_map_uppercase<br>(unicode-data.cpp:2319)"]
+        RangeNFD["unicode_ranges_nfd<br>(unicode-data.h:8)"]
+    end
+
+    subgraph "Model Loading (src/llama-model-loader.h/.cpp)"
+        Loader["llama_model_loader"]
+        GGUF["GGUF metadata<br>tokenizer.ggml.*"]
+    end
+
+    subgraph "Consumers / Touch Points"
+        Grammar["llama-grammar.cpp<br>(tokenize for special tokens)"]
+        Sampler["llama-sampler.cpp<br>(detokenize for grammar)"]
+        Batch["llama-batch.cpp<br>(token_to_piece logging)"]
+        Server["tools/server<br>(prompt tokenization)"]
+        CLI["tools/cli<br>(prompt + chat template)"]
+        Perplexity["tools/perplexity<br>(eval tokenization)"]
+        Speculative["common/speculative.cpp<br>(token comparison)"]
+        Chat["common/chat.cpp<br>(delimiter tokenization)"]
+        Reasoning["common/reasoning-budget.cpp<br>(token counting)"]
+    end
+
+    %% Connections
+    API_Tokenize --> Vocab
+    API_ToPiece --> Vocab
+    API_Detokenize --> Vocab
+    API_Vocab --> Vocab
+
+    Common_Tokenize --> API_Tokenize
+    Common_ToPiece --> API_ToPiece
+    Common_Detokenize --> API_Detokenize
+
+    Vocab --> Impl
+    Impl --> TokenData
+    Impl --> Normalizer
+    Impl --> Fragment
+
+    InitTokenizer --> SPM_Tok
+    InitTokenizer --> BPE_Tok
+    InitTokenizer --> WPM_Tok
+    InitTokenizer --> UGM_Tok
+    InitTokenizer --> RWKV_Tok
+    InitTokenizer --> PLAMO_Tok
+
+    SPM_Sess --> BigramSPM
+    SPM_Sess --> Symbol
+    BPE_Sess --> BigramBPE
+    BPE_Sess --> Symbol
+    BPE_Sess --> BPE_Tok
+    UGM_Sess --> UGM_Tok
+    RWKV_Sess --> RWKV_Tok
+    PLAMO_Sess --> PLAMO_Tok
+
+    BPE_Sess --> HybridDNA
+    BPE_Sess --> WhitespaceTok
+
+    BPE_Tok --> UnicodeRegex
+    UGM_Tok --> Trie
+    UGM_Tok --> XCDA
+    RWKV_Tok --> Trie
+    PLAMO_Tok --> UnicodeCPTs
+    PLAMO_Tok --> UnicodeCPT
+
+    UnicodeRegex --> CustomGPT2
+    UnicodeRegex --> CustomLLAMA3
+    UnicodeRegex --> CustomQWEN2
+    UnicodeRegex --> CustomKimiK2
+    UnicodeFlags --> RangeFlags
+    UnicodeFlags --> WhitespaceSet
+    UnicodeLower --> LowerMap
+
+    Impl --> Loader
+    Loader --> GGUF
+
+    Grammar --> Vocab
+    Sampler --> Vocab
+    Sampler --> Common_ToPiece
+    Batch --> Vocab
+    Server --> Common_Tokenize
+    Server --> Common_ToPiece
+    CLI --> Common_Tokenize
+    CLI --> Common_ToPiece
+    Perplexity --> Common_Tokenize
+    Speculative --> Common_ToPiece
+    Chat --> Common_Tokenize
+    Reasoning --> Common_ToPiece

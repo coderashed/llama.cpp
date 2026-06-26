@@ -1,0 +1,73 @@
+---
+title: Memory Management -- Sequence Diagram (Decode Path)
+---
+
+sequenceDiagram
+    participant ctx as llama_context
+    participant mem as llama_memory_i
+    participant mctx as llama_memory_context_i
+    participant graph as llm_graph_context
+    participant res as llm_graph_result
+
+    Note over ctx: memory_update(false)
+    ctx->>mem: init_update(lctx, false)
+    opt Recurrent/No-op
+        mem-->>ctx: LLAMA_MEMORY_STATUS_NO_UPDATE
+    end
+    opt KV-cache / Hybrid
+        mem-->>mctx: update context (with shift/copy ops)
+        mctx->>mctx: apply()
+        mem-->>ctx: status
+    end
+    ctx->>mem: init_full()
+    mem-->>mctx: full context (worst-case)
+    ctx->>ctx: graph_reserve() with mctx
+
+    Note over ctx: decode() batch loop
+    loop retry (max 1)
+        ctx->>mem: init_batch(balloc, n_ubatch, embd_all)
+        alt FAILED_PREPARE
+            mem-->>ctx: LLAMA_MEMORY_STATUS_FAILED_PREPARE
+            ctx->>ctx: memory_update(true) [optimize]
+            ctx->>mem: init_batch(balloc, n_ubatch, embd_all)
+        else SUCCESS
+            mem-->>mctx: batch context with ubatches
+        end
+    end
+
+    loop over ubatches via mctx->next()
+        ctx->>mctx: get_ubatch()
+        mctx-->>ctx: ubatch (with n_tokens, seq_ids, positions)
+
+        Note over ctx,graph: Determine if graph can be reused
+        ctx->>ctx: process_ubatch()
+        ctx->>graph: new llm_graph_context(ubatch, mctx, ...)
+        graph->>graph: build_rs_inp() [if recurrent/hybrid]
+        graph->>graph: build_attn_inp_kv() [if attention/hybrid]
+
+        alt Hybrid ISWA
+            Note over graph: build_inp_mem_hybrid_iswa()
+            graph->>graph: combines inp_attn + inp_rs
+        else Hybrid
+            Note over graph: build_inp_mem_hybrid()
+            graph->>graph: combines inp_attn + inp_rs
+        else Recurrent-only
+            Note over graph: model calls build_rs() for each state tensor
+            graph->>graph: build_rs(s, s_copy_main, s_copy_extra, ...)
+            Note over graph: zero state -> get_rows(copy) -> cpy(extra)
+        else Attention-only
+            Note over graph: build_attn with kv cache K/V views
+        end
+
+        graph-->>res: built graph
+        ctx->>res: set_inputs(ubatch)
+        ctx->>res: compute (sched forward)
+
+        ctx->>mctx: apply()
+        alt Recurrent
+            mctx->>mem: find_slot(ubatches[i_next])
+        else KV-cache
+            mctx->>mem: apply_ubatch(sinfo, ubatch)
+        end
+        ctx->>mctx: next()
+    end

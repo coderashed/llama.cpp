@@ -1,0 +1,97 @@
+classDiagram
+    class llama_context {
+        +llama_cparams cparams
+        +buffer_view~float~ logits
+        +buffer_view~float~ embd
+        +buffer_view~float~ embd_nextn
+        +map~llama_seq_id, vector~float~~ embd_seq
+        +vector~buffer_view~float~~ embd_layer_inp
+        +vector~int32_t~ output_ids
+        +get_embeddings() float*
+        +get_embeddings_ith(int32_t) float*
+        +get_embeddings_seq(llama_seq_id) float*
+        +get_embeddings_nextn() float*
+        +get_embeddings_nextn_ith(int32_t) float*
+        +get_embeddings_layer_inp(uint32_t) float*
+        +pooling_type() llama_pooling_type
+        +set_embeddings(bool) void
+        +set_embeddings_nextn(bool, bool) void
+        +set_embeddings_layer_inp(uint32_t, bool) void
+    }
+
+    class llama_cparams {
+        +bool embeddings
+        +bool embeddings_nextn
+        +bool embeddings_nextn_masked
+        +vector~bool~ embeddings_layer_inp
+        +llama_pooling_type pooling_type
+    }
+
+    class llama_hparams {
+        +llama_pooling_type pooling_type
+        +uint32_t n_cls_out
+        +n_embd_out() uint32_t
+    }
+
+    class llama_pooling_type {
+        <<enumeration>>
+        LLAMA_POOLING_TYPE_UNSPECIFIED = -1
+        LLAMA_POOLING_TYPE_NONE = 0
+        LLAMA_POOLING_TYPE_MEAN = 1
+        LLAMA_POOLING_TYPE_CLS = 2
+        LLAMA_POOLING_TYPE_LAST = 3
+        LLAMA_POOLING_TYPE_RANK = 4
+    }
+
+    class llm_graph_context {
+        +build_pooling(cls, cls_b, cls_out, cls_out_b, cls_norm) void
+    }
+
+    class llm_graph_input_mean {
+        +set_input(ubatch) void
+    }
+
+    class llm_graph_input_cls {
+        +set_input(ubatch) void
+    }
+
+    class llama_model {
+        +build_graph(params) ggml_cgraph*
+        +llama_hparams hparams
+    }
+
+    class common_embd {
+        +common_embd_normalize(inp, out, n, embd_norm) void
+        +common_embd_similarity_cos(embd1, embd2, n) float
+    }
+
+    class server_slot {
+        +need_embd() bool
+        +send_embedding(slot, batch) void
+        +send_rerank(slot, batch) void
+        +server_task* task
+    }
+
+    class server_task {
+        +server_task_type type
+        +need_embd() bool
+        +params.embd_normalize int
+    }
+
+    class server_task_type {
+        <<enumeration>>
+        SERVER_TASK_TYPE_EMBEDDING
+        SERVER_TASK_TYPE_RERANK
+    }
+
+    llama_context *--> llama_cparams
+    llama_context *--> llama_hparams
+    llama_cparams --> llama_pooling_type
+    llama_hparams --> llama_pooling_type
+    llm_graph_context --> llm_graph_input_mean
+    llm_graph_context --> llm_graph_input_cls
+    llama_model --> llm_graph_context
+    llama_model *--> llama_hparams
+    server_slot *--> server_task
+    server_task --> server_task_type
+    server_slot --> llama_context : uses ctx_tgt

@@ -1,0 +1,102 @@
+---
+title: Memory Management -- Component (Deployment) Diagram
+---
+
+flowchart TB
+    subgraph includes["Public API (include/llama.h)"]
+        llama_memory_t["llama_memory_t\ntypedef struct llama_memory_i*\ninclude/llama.h:66"]
+    end
+
+    subgraph interfaces["Interface Layer (src/llama-memory.h)"]
+        mem_i["llama_memory_i\nsrc/llama-memory.h:73"]
+        mctx_i["llama_memory_context_i\nsrc/llama-memory.h:51"]
+        helpers["llama_memory_status_combine\nllama_memory_status_is_fail\nsrc/llama-memory.cpp:3-59"]
+    end
+
+    subgraph impls["Memory Implementations"]
+        direction TB
+        kv["llama_kv_cache\nStandard KV Cache\nsrc/llama-kv-cache.h:20"]
+        kv_iswa["llama_kv_cache_iswa\nISWA (Base+SWA)\nsrc/llama-kv-cache-iswa.h:14"]
+        kv_dsa["llama_kv_cache_dsa\nDual-Stream Attn\nsrc/llama-kv-cache-dsa.h:15"]
+        recurrent["llama_memory_recurrent\nRecurrent State (R+S tensors)\nsrc/llama-memory-recurrent.h:17"]
+        hybrid["llama_memory_hybrid\nAttn + Recurrent\nsrc/llama-memory-hybrid.h:19"]
+        hybrid_iswa["llama_memory_hybrid_iswa\nISWA Attn + Recurrent\nsrc/llama-memory-hybrid-iswa.h:19"]
+    end
+
+    subgraph factory["Factory (src/llama-model.cpp)"]
+        create_memory["llama_model::create_memory()\nsrc/llama-model.cpp:2003"]
+        arch_check["llm_arch_is_recurrent\nllm_arch_is_hybrid\nsrc/llama-arch.cpp:864-896"]
+    end
+
+    subgraph context["Inference Engine (src/llama-context.cpp)"]
+        ctx_ctor["llama_context ctor\nlines 324-333"]
+        memory_update["memory_update()\nlines 762-815"]
+        decode["decode() loop\nlines 1766-1871"]
+        init_batch_call["init_batch()\nline 1771"]
+        process_ubatch["process_ubatch()\nline 1843"]
+    end
+
+    subgraph graph["Graph Building (src/llama-graph.h/.cpp)"]
+        build_rs["build_rs()\nsrc/llama-graph.cpp:2758\nzero + copy + reorder states"]
+        build_rs_inp["build_rs_inp()\nsrc/llama-graph.cpp:2794\ncreates s_copy tensor"]
+        build_inp_mem_hybrid["build_inp_mem_hybrid()\nsrc/llama-graph.h:477\ncombines attn_kv + rs inputs"]
+        build_inp_mem_hybrid_iswa["build_inp_mem_hybrid_iswa()\nsrc/llama-graph.h:533\ncombines iswa attn + rs inputs"]
+        graph_input_rs["llm_graph_input_rs\nsrc/llama-graph.h:246\ns_copy_main + s_copy_extra"]
+    end
+
+    subgraph models["Model Implementations"]
+        mamba["Mamba\nsrc/models/mamba-base.cpp"]
+        rwkv6["RWKV6\nsrc/models/rwkv6.cpp"]
+        rwkv7["RWKV7\nsrc/models/rwkv7-base.cpp"]
+        qwen35["Qwen3.5 Hybrid\nsrc/models/qwen35.cpp"]
+        kimi["Kimi Linear\nsrc/models/kimi-linear.cpp"]
+        plamo2["Plamo2\nsrc/models/plamo2.cpp"]
+    end
+
+    llama_memory_t --> mem_i
+
+    mem_i <|-- kv
+    mem_i <|-- kv_iswa
+    mem_i <|-- kv_dsa
+    mem_i <|-- recurrent
+    mem_i <|-- hybrid
+    mem_i <|-- hybrid_iswa
+
+    mctx_i <|-- llama_kv_cache_context
+    mctx_i <|-- llama_kv_cache_iswa_context
+    mctx_i <|-- llama_kv_cache_dsa_context
+    mctx_i <|-- llama_memory_recurrent_context
+    mctx_i <|-- llama_memory_hybrid_context
+    mctx_i <|-- llama_memory_hybrid_iswa_context
+
+    kv_iswa --> kv : kv_base
+    kv_iswa --> kv : kv_swa
+    kv_dsa --> kv : kv_mla
+    kv_dsa --> kv : kv_lid
+    hybrid --> kv : mem_attn
+    hybrid --> recurrent : mem_recr
+    hybrid_iswa --> kv_iswa : mem_attn
+    hybrid_iswa --> recurrent : mem_recr
+
+    create_memory --> arch_check : queries
+    create_memory --> kv : creates (attention)
+    create_memory --> recurrent : creates (recurrent archs)
+    create_memory --> hybrid : creates (hybrid archs)
+    create_memory --> hybrid_iswa : creates (hybrid + SWA)
+    create_memory --> kv_dsa : creates (DeepSeek)
+    create_memory --> kv_iswa : creates (attention + SWA)
+
+    ctx_ctor --> create_memory : calls
+    memory_update --> mem_i : init_update + init_full
+    decode --> memory_update : first
+    init_batch_call --> mem_i : init_batch
+    process_ubatch --> graph : builds graph
+
+    graph --> build_rs : for each recurrent state tensor
+    graph --> build_rs_inp : once per graph
+    graph --> build_inp_mem_hybrid : per hybrid graph
+    graph --> build_inp_mem_hybrid_iswa : per hybrid-iswa graph
+    graph --> graph_input_rs
+
+    models --> build_rs : calls per-layer state load/store
+    models --> build_rs_inp : calls once per graph

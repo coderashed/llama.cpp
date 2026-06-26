@@ -1,0 +1,150 @@
+classDiagram
+    class llama_model {
+        +llm_type type
+        +llm_arch arch
+        +llama_hparams hparams
+        +llama_vocab vocab
+        +vector~llama_layer~ layers
+        +vector~llama_device~ devices
+        +unordered_set~llama_adapter_lora*~ loras
+        +impl* pimpl
+        +desc()
+        +size()
+        +build_graph(params)
+    }
+    %% file: src/llama-model.h:522-662
+
+    class llama_model_impl {
+        -uint64_t n_elements
+        -size_t n_bytes
+        -string desc_str
+        -llama_mmaps mappings
+        -llama_mlocks mlock_bufs
+        -vector~pair~ ctxs_bufs
+        -buft_list_t cpu_buft_list
+        -map~dev, buft_list_t~ gpu_buft_list
+        -layer_dev dev_input
+        -layer_dev dev_output
+        -vector~layer_dev~ dev_layer
+        -bool has_tensor_overrides
+    }
+    %% file: src/llama-model.cpp:973-1006
+
+    class llama_context {
+        +llama_context(model, params)
+        +~llama_context()
+        +encode(batch)
+        +decode(batch)
+        +synchronize()
+        +get_logits()
+        +get_logits_ith(i)
+        +get_embeddings()
+        +get_embeddings_seq(seq_id)
+        +set_sampler(seq_id, sampler)
+        +sched_reserve()
+    }
+    %% file: src/llama-context.h:42-390
+
+    class llama_vocab {
+        +load(ml, kv)
+        +n_tokens()
+        +tokenize(text, ...)
+        +token_to_piece(token, ...)
+        +detokenize(tokens, ...)
+        +token_bos()
+        +token_eos()
+        +is_eog(id)
+    }
+    %% file: src/llama-vocab.h:72-202
+
+    class llama_vocab_impl {
+        -llama_vocab_pre_type pre_type
+        -vector~token_data~ id_to_token
+        -unordered_map~string, llama_token~ token_to_id
+        -string tokenizer_model
+        -string tokenizer_pre
+        -vector~llama_token~ token_ids_eos
+        -vector~bpe_merge~ bpe_ranks
+        -normalizer_options normalizer
+    }
+    %% file: src/llama-vocab.cpp:1765-1816 (internal)
+
+    class llama_sampler {
+        +llama_sampler_i* iface
+        +llama_sampler_context_t ctx
+    }
+    %% file: include/llama.h:1275-1279
+
+    class llama_sampler_i {
+        +name(smpl)
+        +accept(smpl, token)
+        +apply(smpl, cur_p)
+        +reset(smpl)
+        +clone(smpl)
+        +free(smpl)
+        +backend_init(smpl, buft)
+        +backend_accept(smpl, ctx, gf, token)
+        +backend_apply(smpl, ctx, gf, data)
+        +backend_set_input(smpl)
+    }
+    %% file: include/llama.h:1242-1273
+
+    class llama_sampler_chain {
+        +llama_sampler_chain_params params
+        +bool is_init
+        +vector~info~ samplers
+        +vector~llama_token_data~ cur
+        +int64_t t_sample_us
+        +int32_t n_sample
+    }
+    %% file: src/llama-sampler.h:12-34
+
+    class llama_adapter_lora {
+        +llama_model* model
+        +unordered_map~string, weight~ ab_map
+        +vector~ggml_context_ptr~ ctxs
+        +vector~ggml_backend_buffer_ptr~ bufs
+        +float alpha
+        +unordered_map~string, string~ gguf_kv
+        +vector~llama_token~ alora_invocation_tokens
+    }
+    %% file: src/llama-adapter.h:63-88
+
+    class llama_batch {
+        +int32_t n_tokens
+        +llama_token* token
+        +float* embd
+        +llama_pos* pos
+        +int32_t* n_seq_id
+        +llama_seq_id** seq_id
+        +int8_t* logits
+    }
+    %% file: include/llama.h:240-249
+
+    class llama_model_params {
+        +ggml_backend_dev_t* devices
+        +int32_t n_gpu_layers
+        +llama_split_mode split_mode
+        +bool vocab_only
+        +bool use_mmap
+    }
+    %% file: include/llama.h:291-327
+
+    class llama_context_params {
+        +uint32_t n_ctx
+        +uint32_t n_batch
+        +uint32_t n_ubatch
+        +int32_t n_threads
+        +llama_pooling_type pooling_type
+        +bool embeddings
+    }
+    %% file: include/llama.h:336-395
+
+    llama_model *-- llama_model_impl : pimpl
+    llama_model *-- llama_vocab : owns
+    llama_model *-- llama_layer : owns
+    llama_vocab *-- llama_vocab_impl : pimpl
+    llama_sampler --> llama_sampler_i : iface
+    llama_sampler --> llama_sampler_chain : ctx (when chain)
+    llama_sampler *-- llama_sampler_context_t : ctx
+    llama_adapter_lora --> llama_model : associated

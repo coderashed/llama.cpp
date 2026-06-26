@@ -1,0 +1,137 @@
+sequenceDiagram
+    participant User as User Code
+    participant API as C API (llama.h)
+    participant Impl as C++ Impl
+    participant GGML as ggml-backend
+
+    rect rgb(200, 230, 255)
+    Note over User,GGML: INITIALIZATION
+    User->>+API: llama_backend_init()
+    API->>GGML: ggml_time_init(), ggml_backend_load_all()
+    API-->>-User: void
+    %% src/llama.cpp:89-102
+    end
+
+    rect rgb(230, 255, 230)
+    Note over User,GGML: MODEL LOADING
+    User->>+API: llama_model_load_from_file(path, params)
+    API->>Impl: llama_model_load_from_file_impl()
+    Impl->>Impl: llama_model_loader(metadata, ...)
+    Impl->>GGML: gguf_init_from_file()
+    GGML-->>Impl: gguf_context*
+    Impl->>Impl: read hparams, vocab, tensor metadata
+    Impl->>GGML: ggml_backend_dev_count()
+    GGML-->>Impl: device list
+    Impl->>API: llama_model*
+    %% src/llama.cpp:426
+    opt on failure
+        API-->>User: nullptr + LLAMA_LOG_ERROR
+    end
+    API-->>-User: llama_model*
+    end
+
+    rect rgb(255, 230, 230)
+    Note over User,GGML: CONTEXT CREATION
+    User->>+API: llama_init_from_model(model, params)
+    API->>+Impl: validate params (n_batch, n_ctx, etc.)
+    alt validation fails
+        Impl-->>API: nullptr + log error
+        API-->>User: nullptr
+    else validation passes
+        Impl->>Impl: new llama_context(*model, params)
+        Impl->>GGML: ggml_backend_sched_new()
+        Impl-->>API: llama_context*
+        API-->>-User: llama_context*
+    end
+    %% src/llama-context.cpp:3490-3571
+    end
+
+    rect rgb(230, 255, 230)
+    Note over User,GGML: TOKENIZATION
+    User->>+API: llama_tokenize(vocab, text, len, tokens, max, add_special, parse_special)
+    API->>Impl: vocab->tokenize(...)
+    Impl->>Impl: tokenizer dispatch (BPE/SPM/WPM/UGM/...)
+    alt success
+        Impl-->>API: n_tokens
+        API-->>User: n_tokens (>= 0)
+    else failure / overflow
+        Impl-->>API: negative / INT32_MIN
+        API-->>User: negative / INT32_MIN
+    end
+    %% src/llama-vocab.cpp:4303-4312
+    end
+
+    rect rgb(255, 230, 230)
+    Note over User,GGML: INFERENCE (DECODE)
+    User->>+API: llama_decode(ctx, batch)
+    API->>+Impl: ctx->decode(batch)
+    Impl->>Impl: build graph (model->build_graph)
+    Impl->>GGML: ggml_backend_sched_graph_compute_async
+    GGML-->>Impl: ggml_status
+    alt success (0)
+        Impl-->>API: 0
+        API-->>User: 0
+    else no KV slot (1)
+        Impl-->>API: 1
+        API-->>User: 1
+    else aborted (2)
+        Impl-->>API: 2
+        API-->>User: 2
+    else fatal (< -1)
+        Impl-->>API: < -1
+        API-->>User: < -1
+    end
+    %% src/llama-context.cpp:4054-4063
+    end
+
+    rect rgb(230, 230, 255)
+    Note over User,GGML: OUTPUT RETRIEVAL
+    User->>+API: llama_get_logits_ith(ctx, i)
+    API->>Impl: ctx->synchronize()
+    Impl->>GGML: ggml_backend_sched_synchronize()
+    API->>Impl: ctx->get_logits_ith(i)
+    Impl-->>API: float* (logit array)
+    API-->>-User: float*
+    %% src/llama-context.cpp:3666-3678
+    end
+
+    rect rgb(255, 255, 230)
+    Note over User,GGML: SAMPLING
+    User->>+API: llama_sampler_sample(smpl, ctx, idx)
+    API->>Impl: get logits for idx, populate token_data_array
+    API->>Impl: llama_sampler_apply(smpl, &cur_p)
+    Impl->>Impl: chain: apply each sub-sampler
+    API->>Impl: llama_sampler_accept(smpl, token)
+    API-->>User: sampled token
+    %% src/llama-sampler.cpp:806-873
+    end
+
+    rect rgb(220, 255, 220)
+    Note over User,GGML: STATE SAVE
+    User->>+API: llama_state_get_data(ctx, dst, size)
+    API->>Impl: ctx->state_get_data(dst, size)
+    Impl->>Impl: serialize KV cache + logits + embeddings
+    Impl-->>API: bytes written
+    API-->>-User: bytes written
+    %% src/llama-context.cpp:state functions
+    end
+
+    rect rgb(255, 220, 220)
+    Note over User,GGML: CLEANUP
+    User->>+API: llama_model_free(model)
+    API->>Impl: delete model
+    Impl->>Impl: ~llama_model() frees loras, buffers
+    API-->>-User: void
+    %% src/llama-model.cpp:2291
+
+    User->>+API: llama_free(ctx)
+    API->>Impl: delete ctx
+    Impl->>Impl: ~llama_context() frees sched, memory
+    API-->>-User: void
+    %% src/llama-context.cpp:3581-3583
+
+    User->>+API: llama_backend_free()
+    API->>GGML: ggml_quantize_free()
+    API-->>-User: void
+    %% src/llama.cpp:116-118
+    end

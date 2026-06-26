@@ -1,0 +1,115 @@
+---
+title: GGML Core Types
+---
+classDiagram
+    class ggml_type {
+        <<enum>>
+        GGML_TYPE_F32 = 0
+        GGML_TYPE_F16 = 1
+        GGML_TYPE_Q4_0 = 2
+        ++ ~30 quantized variants
+        GGML_TYPE_COUNT = 42
+    }
+    note "ggml/include/ggml.h:389-433"
+
+    class ggml_type_traits {
+        +const char* type_name
+        +int64_t blck_size
+        +int64_t blck_size_interleave
+        +size_t type_size
+        +bool is_quantized
+        +ggml_to_float_t to_float
+        +ggml_from_float_t from_float_ref
+    }
+    note "ggml/include/ggml.h:2817-2825"
+
+    class ggml_init_params {
+        +size_t mem_size
+        +void* mem_buffer
+        +bool no_alloc
+    }
+    note "ggml/include/ggml.h:659-664"
+
+    class ggml_object {
+        +size_t offs
+        +size_t size
+        +ggml_object* next
+        +ggml_object_type type
+    }
+    note "ggml/src/ggml.c:939-948"
+
+    class ggml_context {
+        +size_t mem_size
+        +void* mem_buffer
+        +bool mem_buffer_owned
+        +bool no_alloc
+        +int n_objects
+        +ggml_object* objects_begin
+        +ggml_object* objects_end
+    }
+    note "ggml/src/ggml.c:956-966"
+
+    class ggml_tensor {
+        +ggml_type type
+        +ggml_backend_buffer* buffer
+        +int64_t ne[4]
+        +size_t nb[4]
+        +ggml_op op
+        +int32_t op_params[16]
+        +int32_t flags
+        +ggml_tensor* src[10]
+        +ggml_tensor* view_src
+        +size_t view_offs
+        +void* data
+        +char name[64]
+        +void* extra
+    }
+    note "ggml/include/ggml.h:667-699"
+
+    class ggml_cgraph {
+        +int size
+        +int n_nodes
+        +int n_leafs
+        +ggml_tensor** nodes
+        +ggml_tensor** grads
+        +ggml_tensor** grad_accs
+        +ggml_tensor** leafs
+        +int32_t* use_counts
+        +ggml_hash_set visited_hash_set
+        +ggml_cgraph_eval_order order
+        +uint64_t uid
+    }
+    note "ggml/src/ggml-impl.h:329-347"
+
+    class ggml_cplan {
+        +size_t work_size
+        +uint8_t* work_data
+        +int n_threads
+        +ggml_threadpool* threadpool
+        +ggml_abort_callback abort_callback
+        +void* abort_callback_data
+        +bool use_ref
+    }
+    note "ggml/include/ggml-cpu.h:12-25"
+
+    ggml_init_params ..> ggml_context : ggml_init()
+    note "ggml/src/ggml.c:1571-1611"
+
+    ggml_context *--> ggml_object : objects_begin / objects_end
+    ggml_context *--> "creates" ggml_tensor
+
+    ggml_object <.. ggml_tensor : allocated inside arena
+    ggml_tensor --> ggml_type : type
+
+    ggml_tensor --> ggml_tensor : src[0..9] (graph edges)
+    ggml_tensor --> ggml_tensor : view_src (zero-copy views)
+    ggml_cgraph *--> ggml_tensor : nodes[] / leafs[]
+
+    ggml_tensor ..> ggml_type_traits : ggml_get_type_traits()
+    note "ggml/include/ggml.h:2827"
+
+    ggml_cgraph ..> ggml_cplan : ggml_graph_plan()
+    note "ggml/include/ggml-cpu.h:66-69"
+
+    ggml_cplan ..> ggml_cgraph : ggml_graph_compute()
+    note "ggml/src/ggml-cpu/ggml-cpu.c:3308"

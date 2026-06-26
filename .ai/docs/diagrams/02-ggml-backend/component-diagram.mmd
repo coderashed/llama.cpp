@@ -1,0 +1,56 @@
+%% component-diagram.mmd -- All backends, registry at center, usage by llama.cpp subsystems
+%% flowchart TD layout.
+
+flowchart TD
+    Registry["ggml_backend_registry constructor<br>ggml-backend-reg.cpp:115-167"]
+
+    CUDA["CUDA<br>ggml_backend_cuda_reg()<br>ggml-cuda/ggml-cuda.cu:5650"]
+    Metal["Metal<br>ggml_backend_metal_reg()<br>ggml-metal/ggml-metal.cpp:908"]
+    SYCL["SYCL<br>ggml_backend_sycl_reg()<br>ggml-sycl/ggml-sycl.cpp:6141"]
+    Vulkan["Vulkan<br>ggml_backend_vk_reg()<br>ggml-vulkan/ggml-vulkan.cpp:17805"]
+    WebGPU["WebGPU<br>ggml_backend_webgpu_reg()<br>ggml-webgpu/ggml-webgpu.cpp:4508"]
+    OpenCL["OpenCL<br>ggml_backend_opencl_reg()<br>ggml-opencl/ggml-opencl.cpp:8471"]
+    RPC["RPC<br>ggml_backend_rpc_reg()<br>ggml-rpc/ggml-rpc.cpp:1902"]
+    CPU["CPU<br>ggml_backend_cpu_reg()<br>ggml-cpu/ggml-cpu.cpp:690"]
+    BLAS["BLAS<br>ggml_backend_blas_reg()<br>ggml-backend-reg.cpp:156"]
+    OpenVINO["OpenVINO<br>ggml_backend_openvino_reg()<br>ggml-backend-reg.cpp:162"]
+    CANN["CANN<br>ggml_backend_cann_reg()<br>ggml-backend-reg.cpp:153"]
+    Hexagon["Hexagon<br>ggml_backend_hexagon_reg()<br>ggml-backend-reg.cpp:150"]
+    ZDNN["ZDNN<br>ggml_backend_zdnn_reg()<br>ggml-backend-reg.cpp:137"]
+    VirtGPU["VirtGPU<br>ggml_backend_virtgpu_reg()<br>ggml-backend-reg.cpp:140"]
+
+    subgraph llama_Subsystems ["llama.cpp Subsystems"]
+        ModelLoader["Model Loader<br>llama_prepare_model_devices()<br>src/llama.cpp:125<br>load_tensors()<br>src/llama-model.cpp:1209"]
+        Inference["Inference Engine<br>ggml_backend_sched_new()<br>ggml-backend.cpp:1727<br>ggml_backend_sched_graph_compute()<br>ggml-backend.cpp:1883"]
+        Sampler["Sampler<br>backend_init callback<br>with ggml_backend_buffer_type_t<br>include/llama.h:1255"]
+    end
+
+    MetaDevice["Meta Device (Tensor Parallelism)<br>ggml_backend_meta_device()<br>ggml-backend-meta.cpp:213"]
+
+    Registry --> CUDA
+    Registry --> Metal
+    Registry --> SYCL
+    Registry --> Vulkan
+    Registry --> WebGPU
+    Registry --> OpenCL
+    Registry --> RPC
+    Registry --> CPU
+    Registry --> BLAS
+    Registry --> OpenVINO
+    Registry --> CANN
+    Registry --> Hexagon
+    Registry --> ZDNN
+    Registry --> VirtGPU
+
+    CUDA -.-> MetaDevice
+    Metal -.-> MetaDevice
+    SYCL -.-> MetaDevice
+    Vulkan -.-> MetaDevice
+
+    ModelLoader --> Registry
+    ModelLoader --> MetaDevice
+
+    Inference --> Registry
+    Inference --> CPU
+
+    Sampler --> Registry

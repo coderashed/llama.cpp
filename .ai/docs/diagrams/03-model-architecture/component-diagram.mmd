@@ -1,0 +1,88 @@
+flowchart LR
+    subgraph GGUF_File["GGUF File on Disk"]
+        direction LR
+        GGUF_meta["KV metadata\ngeneral.architecture\nn_ctx_train, n_embd, ...\nrope params, ..."]
+        GGUF_tensors["tensor data\n(token_embd, blk.*.attn_q, ...)"]
+    end
+
+    subgraph Registry["Architecture Registry (llama-arch)"]
+        direction LR
+        ENUM["llm_arch enum\nsrc/llama-arch.h:13"]
+        KV_NAMES["LLM_KV_NAMES\nmap[llm_kv]->key template\nsrc/llama-arch.cpp:144"]
+        TENSOR_NAMES["LLM_TENSOR_NAMES\nmap[llm_tensor]->name template\nsrc/llama-arch.cpp:359"]
+        TENSOR_INFOS["LLM_TENSOR_INFOS\nmap[llm_tensor]->(layer, ggml_op)\nsrc/llama-arch.cpp:584"]
+        KV_HELPER["LLM_KV class\narch+suffix, formats keys\nsrc/llama-arch.h:589"]
+        TN_HELPER["LLM_TN class\narch, formats tensor names\nsrc/llama-arch.h:631"]
+        ARCH_NAMES["LLM_ARCH_NAMES\nmap[llm_arch]->string\nsrc/llama-arch.cpp:8"]
+        UTIL["util: llm_arch_from_string()\nsrc/llama-arch.cpp:850"]
+        UTIL2["util: llm_tensor_info_for()\nsrc/llama-arch.cpp:860"]
+    end
+
+    subgraph HParams["Hyperparameters (llama-hparams)"]
+        HP["llama_hparams struct\nn_ctx_train, n_embd, n_layer\nn_head_arr, n_ff_arr\n+ arch-specific fields\nsrc/llama-hparams.h:39"]
+        CP["llama_cparams struct\nn_ctx, n_batch, n_ubatch\nrope scaling, flash_attn\nsrc/llama-cparams.h:10"]
+    end
+
+    subgraph ModelClasses["Model Class Hierarchy (llama-model)"]
+        direction TB
+        MODEL["llama_model struct\narch, hparams, vocab\nlayers[], global tensors\npure virtual interface\nsrc/llama-model.h:522"]
+        BASE["llama_model_base\nload_hparams, load_vocab\nload_tensors, create_tensor\nsrc/llama-model.h:668"]
+        FACTORY["llama_model_mapping(arch, params)\ngiant switch -> new per-arch class\nsrc/llama-model.cpp:38"]
+        CREATE["llama_model_create(ml, params)\ndispatch via get_arch()\nsrc/llama-model.cpp:320"]
+        PER_ARCH["llama_model_llama\nllama_model_falcon\nllama_model_bert\nllama_model_t5\nllama_model_mamba\n... +127 more\nsrc/models/models.h"]
+        LAYER["llama_layer struct\n~160 ggml_tensor* fields\nattn, ffn, ssm, rwkv, ...\nsrc/llama-model.h:223"]
+    end
+
+    subgraph Loader["Model Loader (llama-model-loader)"]
+        direction LR
+        LOADER["llama_model_loader\nweights_map, n_tensors\nfiles, mappings, ctx_map\nconstructor reads GGUF\nsrc/llama-model-loader.h:31"]
+        CTOR_DETAIL["ctor: gguf_init_from_file()\nget arch -> llm_kv\nsrc/llama-model-loader.cpp:512"]
+        GETKEY["get_key/get_arr/get_key_or_arr\nreads KV with override support\nsrc/llama-model-loader.h:154"]
+        CREATE_TENSOR["create_tensor(hparams, buft_...)\nalloc ggml_tensor, assign buft\nsrc/llama-model-loader.cpp:1047"]
+        DONE["done_getting_tensors()\nvalidate n_created vs n_tensors\nsrc/llama-model-loader.h:187"]
+        INIT_MAP["init_mappings()\nset up mmap regions\nsrc/llama-model-loader.cpp:1335"]
+        LOAD_DATA["load_all_data()\ncopy/mmap tensor data\nsrc/llama-model-loader.cpp:1408"]
+    end
+
+    subgraph Saver["Model Saver (llama-model-saver)"]
+        SAVER["llama_model_saver\ncreate gguf, add keys+tensors\nsave to file\nsrc/llama-model-saver.h:12"]
+        SAVER_ARCH_CHECK["supports_arch()\nblocks 13 archs from round-trip\nsrc/llama-model-saver.cpp:15"]
+    end
+
+    GGUF_File -->|"llama_model_load_from_file()\nsrc/llama.cpp:426"| LOADER
+    LOADER -->|"constructor line 553-554"| CTOR_DETAIL
+    CTOR_DETAIL -->|"read general.architecture"| GGUF_meta
+    CTOR_DETAIL -->|"llm_arch_from_string()"| UTIL
+    UTIL -->|"lookup"| ARCH_NAMES
+    CTOR_DETAIL -->|"llm_kv = LLM_KV(arch)"| KV_HELPER
+    KV_HELPER -->|"formats key names via %s"| KV_NAMES
+    LOADER -->|"load() -> llama_model_create()\nsrc/llama.cpp:286"| CREATE
+    CREATE -->|"ml.get_arch()"| LOADER
+    CREATE -->|"dispatch"| FACTORY
+    FACTORY -->|"new llama_model_<ARCH>(params)"| PER_ARCH
+    MODEL <-->|"inherits"| BASE
+    BASE <|--|"inherits"| PER_ARCH
+    MODEL -->|"contains"| HP
+    MODEL -->|"contains array of"| LAYER
+    MODEL -->|"uses during inference"| CP
+
+    LOADER -->|"load_hparams(ml)\nsrc/llama.cpp:309"| BASE
+    BASE -->|"read standard keys"| GETKEY
+    BASE -->|"load_arch_hparams()"| PER_ARCH
+    LOADER -->|"load_tensors(ml)\nsrc/llama.cpp:330"| BASE
+    BASE -->|"load_arch_tensors()"| PER_ARCH
+    PER_ARCH -->|"create_tensor(tn(...), ...)"| BASE
+    BASE -->|"create_tensor(hparams, buft...)"| CREATE_TENSOR
+    CREATE_TENSOR -->|"lookup buft type"| TENSOR_INFOS
+    CREATE_TENSOR -->|"format tensor name"| TN_HELPER
+    TN_HELPER -->|"pattern from"| TENSOR_NAMES
+
+    DONE -->|"validate after all create_tensor() calls"| CREATE_TENSOR
+    INIT_MAP -->|"after all tensors created"| LOAD_DATA
+    LOAD_DATA -->|"read tensor bytes"| GGUF_tensors
+    LOAD_DATA -->|"populate"| MODEL
+
+    SAVER -->|"read model->hparams"| HP
+    SAVER -->|"read model->arch"| MODEL
+    SAVER -->|"check arch support"| SAVER_ARCH_CHECK
+    SAVER -->|"write tensors"| GGUF_tensors

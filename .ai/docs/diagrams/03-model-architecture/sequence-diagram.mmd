@@ -1,0 +1,84 @@
+sequenceDiagram
+    participant User as User Code
+    participant LMF as llama_model_load_from_file
+    participant LML as llama_model_load
+    participant MLC as llama_model_loader ctor
+    participant MCR as llama_model_create
+    participant MMAP as llama_model_mapping
+    participant BASE as llama_model_base
+    participant ARCH as llama_model_llama (per-arch)
+
+    User->>LMF: llama_model_load_from_file(path, params)
+    note over LMF: src/llama.cpp:426
+    LMF->>LMF: llama_model_load_from_file_impl()
+    note over LMF: src/llama.cpp:341
+    LMF->>LML: llama_model_load(metadata, ..., fname, params)
+    note over LML: src/llama.cpp:279
+
+    LML->>MLC: llama_model_loader(metadata, fname, ...)
+    note over MLC: src/llama-model-loader.cpp:512
+    MLC->>MLC: gguf_init_from_file(fname) 
+    MLC->>MLC: get_key(LLM_KV_GENERAL_ARCHITECTURE, arch_name)
+    MLC->>MLC: llm_kv = LLM_KV(llm_arch_from_string(arch_name))
+    note over MLC: src/llama-arch.cpp:850
+    MLC-->>LML: constructed loader
+
+    LML->>MCR: llama_model_create(ml, params)
+    note over MCR: src/llama-model.cpp:320
+    MCR->>MLC: ml.get_arch()
+    alt arch == LLM_ARCH_UNKNOWN
+        MCR-->>LML: throw runtime_error
+    else arch known
+        MCR->>MMAP: llama_model_mapping(arch, params)
+        note over MMAP: src/llama-model.cpp:38
+        MMAP->>ARCH: new llama_model_llama(params)
+        note over ARCH: src/models/models.h:137
+        ARCH-->>MCR: model pointer
+        MCR-->>LML: llama_model*
+    end
+
+    LML->>BASE: model->load_hparams(ml)
+    note over BASE: src/llama-model.cpp:1023
+    BASE->>BASE: copy gguf_kv metadata
+    BASE->>MLC: get_key n_ctx_train, n_embd, ...
+    BASE->>ARCH: load_arch_hparams(ml)
+    note over ARCH: e.g. src/models/llama.cpp:3
+    ARCH-->>BASE: arch-specific hparams set
+    BASE-->>LML: hparams loaded
+
+    LML->>BASE: model->load_vocab(ml)
+    note over BASE: src/llama-model.cpp:1203
+    BASE->>MLC: read tokenizer data
+    BASE-->>LML: vocab loaded
+
+    LML->>BASE: model->load_tensors(ml)
+    note over BASE: src/llama-model.cpp:1209
+    BASE->>BASE: build buft lists (CPU/GPU)
+    BASE->>ARCH: load_arch_tensors(ml)
+    note over ARCH: e.g. src/models/llama.cpp:34
+    ARCH->>BASE: create_tensor(tn(...), {dims}, flags)
+    BASE->>MLC: create_tensor(hparams, buft_list, tn, ...)
+    note over MLC: src/llama-model-loader.cpp:1047
+    MLC->>MLC: allocate ggml_tensor metadata
+    MLC->>MLC: assign buffer type via llm_tensor_info_for()
+    note over MLC: src/llama-arch.cpp:860
+    MLC-->>BASE: ggml_tensor*
+    BASE-->>LML: tensors registered
+
+    LML->>MLC: ml.init_mappings()
+    note over MLC: src/llama-model-loader.cpp:1335
+    MLC->>MLC: set up mmap regions
+    MLC-->>LML: mappings ready
+
+    LML->>MLC: ml.load_all_data()
+    note over MLC: src/llama-model-loader.cpp:1408
+    alt use_mmap
+        MLC->>MLC: tensor data = mmap ptr
+    else no mmap
+        MLC->>MLC: file->read_raw() into buffers
+    end
+    MLC->>MLC: check_tensors ? validate via ggml_validate_row_data()
+    MLC-->>LML: data loaded
+
+    LML-->>LMF: populated llama_model*
+    LMF-->>User: llama_model*

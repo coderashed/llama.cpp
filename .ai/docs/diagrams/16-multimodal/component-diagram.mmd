@@ -1,0 +1,132 @@
+graph TB
+    subgraph "User-Facing Tools"
+        MTMD_CLI["llama-mtmd-cli<br>(mtmd-cli.cpp)"]
+        SERVER["llama-server<br>(server-context.cpp)"]
+        CLI["llama-cli"]
+    end
+
+    subgraph "libmtmd C API (mtmd.h)"
+        INIT["mtmd_init_from_file<br>(mtmd.h:123)"]
+        TOKENIZE["mtmd_tokenize<br>(mtmd.h:277)"]
+        ENCODE["mtmd_encode_chunk<br>(mtmd.h:289)"]
+        GET_EMBD["mtmd_get_output_embd<br>(mtmd.h:295)"]
+        BATCH["mtmd_batch_encode<br>(mtmd.h:313)"]
+        SUPPORT["mtmd_support_vision/audio<br>(mtmd.h:137-140)"]
+    end
+
+    subgraph "libmtmd Implementation (mtmd.cpp)"
+        MTMD_CTX["mtmd_context<br>(mtmd.cpp:260)"]
+        TOKENIZER["mtmd_tokenizer<br>(mtmd.cpp:814)"]
+        MTMD_ENCODE["mtmd_encode_impl<br>(mtmd.cpp:1442)"]
+        MTMD_BATCH["mtmd_batch<br>(mtmd.cpp:201)"]
+    end
+
+    subgraph "CLIP Vision Encoder (clip.cpp / clip.h)"
+        CLIP_CTX["clip_ctx<br>(clip.cpp:146)"]
+        CLIP_INIT["clip_init<br>(clip.cpp:3134)"]
+        CLIP_ENCODE["clip_image_batch_encode<br>(clip.cpp:3495)"]
+        CLIP_MODEL["clip_model<br>(clip-model.h:352)"]
+    end
+
+    subgraph "Model-Specific Graph Builders (models/)"
+        LLAVA["clip_graph_llava<br>(models/llava.cpp)"]
+        QWEN2VL["clip_graph_qwen2vl<br>(models/qwen2vl.cpp)"]
+        QWEN3VL["clip_graph_qwen3vl<br>(models/qwen3vl.cpp)"]
+        INTERNVL["clip_graph_internvl<br>(models/internvl.cpp)"]
+        MINICPMV["clip_graph_minicpmv<br>(models/minicpmv.cpp)"]
+        SIGLIP["clip_graph_siglip<br>(models/siglip.cpp)"]
+        PIXTRAL["clip_graph_pixtral<br>(models/pixtral.cpp)"]
+        HUNYUAN["clip_graph_hunyuanvl<br>(models/hunyuanvl.cpp)"]
+        GEMMA4V["clip_graph_gemma4v<br>(models/gemma4v.cpp)"]
+        GRANITE4["clip_graph_granite4_vision<br>(models/granite4-vision.cpp)"]
+        MOBILENET["clip_graph_mobilenetv5<br>(models/mobilenetv5.cpp)"]
+        KIMIVL["clip_graph_kimivl<br>(models/kimivl.cpp)"]
+        OTHERS["(20+ more)"]
+    end
+
+    subgraph "Image Preprocessors (mtmd-image.h/.cpp)"
+        PREPROC_FIXED["mtmd_image_preprocessor_fixed_size<br>(mtmd-image.h:113)"]
+        PREPROC_DYN["mtmd_image_preprocessor_dyn_size<br>(mtmd-image.h:121)"]
+        PREPROC_UHD["mtmd_image_preprocessor_llava_uhd<br>(mtmd-image.h:60)"]
+        PREPROC_LONG["mtmd_image_preprocessor_longest_edge<br>(mtmd-image.h:127)"]
+    end
+
+    subgraph "Helper Layer (mtmd-helper.h/.cpp)"
+        EVAL_CHUNKS["mtmd_helper_eval_chunks<br>(mtmd-helper.h:74)"]
+        EVAL_SINGLE["mtmd_helper_eval_chunk_single<br>(mtmd-helper.h:85)"]
+        DECODE_IMG["mtmd_helper_decode_image_chunk<br>(mtmd-helper.h:99)"]
+        FILE_LOAD["mtmd_helper_bitmap_init_from_file<br>(mtmd-helper.h:43)"]
+        VIDEO["Video helper<br>(mtmd-helper.h:136-158)"]
+    end
+
+    subgraph "llama.cpp Core (llama.h)"
+        LLAMA_DECODE["llama_decode<br>(llama.h)"]
+        LLAMA_TOKENIZE["llama_tokenize<br>(llama.h)"]
+        LLAMA_BATCH["llama_batch<br>(llama.h)"]
+    end
+
+    subgraph "GGUF Model Files"
+        TEXT_MODEL["Text Model .gguf"]
+        MMPROJ["mmproj .gguf"]
+    end
+
+    %% Tool-to-libmtmd connections
+    MTMD_CLI --> INIT
+    MTMD_CLI --> TOKENIZE
+    MTMD_CLI --> ENCODE
+    MTMD_CLI --> GET_EMBD
+    MTMD_CLI --> EVAL_SINGLE
+    SERVER --> INIT
+    SERVER --> TOKENIZE
+    SERVER --> ENCODE
+    SERVER --> EVAL_CHUNKS
+    SERVER --> SUPPORT
+
+    %% libmtmd internal connections
+    INIT --> MTMD_CTX
+    TOKENIZE --> TOKENIZER
+    ENCODE --> MTMD_ENCODE
+    BATCH --> MTMD_BATCH
+
+    %% mtmd_context internals
+    MTMD_CTX --> CLIP_INIT
+    MTMD_CTX --> PREPROC_FIXED
+    MTMD_CTX --> PREPROC_DYN
+    MTMD_CTX --> PREPROC_UHD
+    MTMD_CTX --> PREPROC_LONG
+
+    %% CLIP internals
+    CLIP_INIT --> CLIP_CTX
+    CLIP_CTX --> CLIP_MODEL
+    CLIP_ENCODE --> CLIP_CTX
+    CLIP_ENCODE --> LLAVA
+    CLIP_ENCODE --> QWEN2VL
+    CLIP_ENCODE --> QWEN3VL
+    CLIP_ENCODE --> INTERNVL
+    CLIP_ENCODE --> MINICPMV
+    CLIP_ENCODE --> SIGLIP
+    CLIP_ENCODE --> PIXTRAL
+    CLIP_ENCODE --> HUNYUAN
+    CLIP_ENCODE --> GEMMA4V
+    CLIP_ENCODE --> GRANITE4
+    CLIP_ENCODE --> MOBILENET
+    CLIP_ENCODE --> KIMIVL
+    CLIP_ENCODE --> OTHERS
+
+    %% Helper integration
+    EVAL_CHUNKS --> EVAL_SINGLE
+    EVAL_SINGLE --> LLAMA_DECODE
+    EVAL_SINGLE --> ENCODE
+    EVAL_SINGLE --> GET_EMBD
+    DECODE_IMG --> LLAMA_DECODE
+    DECODE_IMG --> LLAMA_BATCH
+    FILE_LOAD --> TOKENIZE
+
+    %% File loading
+    INIT --> MMPROJ
+    LLAMA_DECODE --> TEXT_MODEL
+    LLAMA_TOKENIZE --> TEXT_MODEL
+
+    %% Label
+    MTMD_CTX --> LLAMA_TOKENIZE
+    TOKENIZER --> LLAMA_TOKENIZE

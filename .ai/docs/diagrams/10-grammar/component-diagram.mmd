@@ -1,0 +1,137 @@
+flowchart TD
+    subgraph Public_API["Public API (include/llama.h)"]
+        API_INIT["llama_sampler_init_grammar()<br/>line 1376"]
+        API_LAZY["llama_sampler_init_grammar_lazy_patterns()<br/>line 1395"]
+    end
+
+    subgraph Common_Layer["Common Layer (common/)"]
+        direction TB
+        GTYPES["common_grammar_type enum<br/>common_grammar struct<br/>common.h:174-195"]
+        GTRIGGERS["common_grammar_trigger<br/>common_grammar_trigger_type<br/>common.h:132-143"]
+        SETUP["sampling.cpp: grammar setup &amp; prefill<br/>line 200-296"]
+        GBNF_LITERAL["gbnf_format_literal()<br/>json-schema-to-grammar.h:41"]
+    end
+
+    subgraph Grammar_Engine["Grammar Engine (src/)"]
+        direction TB
+        subgraph Parser["GBNF Parser"]
+            GPARSER["llama_grammar_parser<br/>llama-grammar.h:86<br/>parse() → rules array"]
+            GELEM["llama_grammar_element (enum + value)<br/>llama-grammar.h:47"]
+        end
+
+        subgraph Runtime["Grammar Runtime"]
+            GSTRUCT["llama_grammar<br/>llama-grammar.h:126<br/>(rules, stacks, trigger state)"]
+            APPLY["llama_grammar_apply_impl()<br/>llama-grammar.cpp:1339<br/>(token rejection)"]
+            ACCEPT["llama_grammar_accept_impl()<br/>llama-grammar.cpp:1382<br/>(stack advancement)"]
+            ADVANCE["llama_grammar_advance_stack()<br/>llama-grammar.cpp:853<br/>(resolve rule refs)"]
+            REJECT["llama_grammar_reject_candidates()<br/>llama-grammar.cpp:936<br/>(intersection over stacks)"]
+            UTF8["decode_utf8() + partial_utf8<br/>llama-grammar.cpp:34-92"]
+        end
+
+        subgraph Internal_API["Internal Init API"]
+            INIT_RULES["llama_grammar_init_impl(parsed rules)<br/>llama-grammar.h:158"]
+            INIT_STR["llama_grammar_init_impl(GBNF string)<br/>llama-grammar.h:164"]
+        end
+
+        subgraph Sampler_Integration["Sampler Integration"]
+            SAMP_STRUCT["llama_sampler_grammar<br/>llama-sampler.cpp:2428"]
+            SAMP_APPLY["llama_sampler_grammar_apply<br/>llama-sampler.cpp:2448"]
+            SAMP_ACCEPT["llama_sampler_grammar_accept_impl<br/>llama-sampler.cpp:2441"]
+            SAMP_RESET["llama_sampler_grammar_reset<br/>llama-sampler.cpp:2468"]
+            SAMP_CLONE["llama_sampler_grammar_clone<br/>llama-sampler.cpp:2488"]
+            SAMP_INIT["llama_sampler_init_grammar_impl<br/>llama-sampler.cpp:2532"]
+        end
+    end
+
+    subgraph JSON_Schema["JSON Schema Bridge"]
+        JSB["json_schema_to_grammar()<br/>json-schema-to-grammar.cpp:1158"]
+        CONV["common_schema_converter<br/>json-schema-to-grammar.cpp:312<br/>(visit() → GBNF rules)"]
+        INFO["common_schema_info<br/>json-schema-to-grammar.h:15<br/>(resolves_to_string())"]
+        PRIM["PRIMITIVE_RULES + STRING_FORMAT_RULES<br/>json-schema-to-grammar.cpp:235-257"]
+    end
+
+    subgraph PEG["PEG Parser Builder"]
+        PEG_BUILDER["common_peg_parser_builder<br/>peg-parser.h:352<br/>literal(), sequence(), choice(), ..."]
+        PEG_ARENA["common_peg_arena<br/>peg-parser.h:308<br/>build_grammar() → GBNF"]
+        PEG_EXEC["common_peg_arena::parse()<br/>peg-parser.cpp:937<br/>(input parsing / validation)"]
+        PEG_TYPES["parser variants (21 types)<br/>peg-parser.h:284-306"]
+        PEG_AC["Aho-Corasick automaton<br/>peg-parser.cpp:124-181"]
+        PEG_GBNF_GEN["to_gbnf() + gbnf_excluding/including<br/>peg-parser.cpp:1761-1890"]
+    end
+
+    subgraph llguidance["External llguidance"]
+        LLG_INIT["llama_sampler_init_llg()<br/>llguidance.cpp:219"]
+        LLG_TOK["LlgTokenizer (from vocab)<br/>llguidance.cpp:137"]
+        LLG_MATCH["LlgMatcher (bitmask rejection)<br/>llguidance.cpp:17"]
+        LLG_APPLY["llama_sampler_llg_apply<br/>llguidance.cpp:46"]
+    end
+
+    subgraph Server["Server (tools/server/)"]
+        SRV_SCHEMA["server-schema.cpp:248-278<br/>json_schema / grammar parsing"]
+        SRV_COMMON["server-common.cpp:933-1105<br/>grammar routing &amp; prefill"]
+    end
+
+    subgraph Tests["Tests"]
+        T_GBNF["test-gbnf-validator.cpp"]
+        T_GRAMMAR["test-llama-grammar.cpp"]
+        T_INTEG["test-grammar-integration.cpp"]
+        T_JSON["test-json-schema-to-grammar.cpp"]
+        T_LLG["test-grammar-llguidance.cpp"]
+    end
+
+    %% Connections
+    API_INIT --> SAMP_INIT
+    API_LAZY --> SAMP_INIT
+    SAMP_INIT --> INIT_STR
+    SAMP_INIT --> SAMP_STRUCT
+    INIT_STR --> GPARSER
+    INIT_STR --> INIT_RULES
+
+    SAMP_APPLY --> APPLY
+    SAMP_ACCEPT --> ACCEPT
+    APPLY --> REJECT
+    REJECT --> ADVANCE
+    APPLY --> UTF8
+    ACCEPT --> UTF8
+    ACCEPT --> ADVANCE
+
+    SETUP --> API_INIT
+    SETUP --> GTYPES
+    SETUP --> GTRIGGERS
+
+    JSB --> CONV
+    JSB --> INFO
+    JSB --> PRIM
+    CONV --> GBNF_LITERAL
+    JSB --> GTYPES
+
+    PEG_BUILDER --> PEG_ARENA
+    PEG_ARENA --> PEG_GBNF_GEN
+    PEG_ARENA --> PEG_EXEC
+    PEG_ARENA --> PEG_TYPES
+    PEG_GBNF_GEN --> PEG_AC
+    PEG_ARENA --> GBNF_LITERAL
+
+    LLG_INIT --> LLG_TOK
+    LLG_INIT --> LLG_MATCH
+    LLG_APPLY --> LLG_MATCH
+
+    SRV_SCHEMA --> JSB
+    SRV_SCHEMA --> GTYPES
+    SRV_SCHEMA --> GTRIGGERS
+    SRV_COMMON --> SETUP
+
+    T_GBNF --> INIT_STR
+    T_GRAMMAR --> INIT_RULES
+    T_INTEG --> JSB
+    T_INTEG --> GPARSER
+    T_JSON --> JSB
+    T_JSON --> SRV_COMMON
+    T_LLG --> LLG_INIT
+
+    style Parser fill:#e1f5fe
+    style Runtime fill:#e1f5fe
+    style JSON_Schema fill:#f3e5f5
+    style PEG fill:#fff3e0
+    style llguidance fill:#fce4ec
+    style Sampler_Integration fill:#e8f5e9

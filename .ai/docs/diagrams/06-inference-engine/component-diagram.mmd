@@ -1,0 +1,207 @@
+---
+title: Inference Engine -- Component Diagram
+---
+
+flowchart TB
+    subgraph User["User / Application"]
+        direction LR
+        UserCode["User Code<br/>(main, server, etc.)"]
+    end
+
+    subgraph PublicAPI["Public C API (include/llama.h)"]
+        direction LR
+        API_decode["llama_decode()<br/>llama.h:959"]
+        API_encode["llama_encode()<br/>llama.h:943"]
+        API_init["llama_init_from_model()<br/>llama.h:514"]
+        API_batch["llama_batch_get_one()<br/>llama.h:918<br/>llama_batch_init()<br/>llama.h:929"]
+        API_logits["llama_get_logits()<br/>llama.h:1004<br/>llama_get_logits_ith()<br/>llama.h:1010"]
+        API_embd["llama_get_embeddings()<br/>llama.h:1019<br/>llama_get_embeddings_seq()<br/>llama.h:1032"]
+        API_sampling["llama_get_sampled_token_ith()<br/>llama.h:1041"]
+    end
+
+    subgraph ContextMgmt["Context Management (src/llama-context.*)"]
+        direction TB
+        CtxCtor["llama_context constructor<br/>src/llama-context.cpp:33"]
+        CtxDecode["llama_context::decode()<br/>src/llama-context.cpp:1680"]
+        CtxEncode["llama_context::encode()<br/>src/llama-context.cpp:1376"]
+        CtxProcess["llama_context::process_ubatch()<br/>src/llama-context.cpp:1304"]
+        CtxReserve["sched_reserve()<br/>src/llama-context.cpp:439"]
+        CtxGraphReserve["graph_reserve()<br/>src/llama-context.cpp:2338"]
+        CtxGraphCompute["graph_compute()<br/>src/llama-context.cpp:2421"]
+        CtxOutputReserve["output_reserve()<br/>src/llama-context.cpp:2062"]
+    end
+
+    subgraph GraphBuilder["Graph Builder (src/llama-graph.* + models/)"]
+        direction TB
+        GBuild["llama_model::build_graph()<br/>src/llama-model.cpp:2234"]
+        GArch["build_arch_graph() [per-arch]<br/>e.g. src/models/llama.cpp:94"]
+        GResult["llm_graph_result<br/>src/llama-graph.h:703"]
+        GParams["llm_graph_params<br/>src/llama-graph.h:588"]
+        GCtx["llm_graph_context<br/>src/llama-graph.h:789"]
+
+        subgraph GraphOps["Graph Operations"]
+            direction LR
+            GEmb["build_inp_embd()<br/>src/llama-graph.cpp:1833"]
+            GPos["build_inp_pos()<br/>src/llama-graph.cpp:1922"]
+            GQKV["build_qkv()<br/>src/llama-graph.h:880"]
+            GFFN["build_ffn()<br/>src/llama-graph.h:888"]
+            GMoE["build_moe_ffn()<br/>src/llama-graph.h:905"]
+            GAttn["build_attn()<br/>src/llama-graph.h:983"]
+            GMHA["build_attn_mha()<br/>src/llama-graph.cpp:2066"]
+            GPool["build_pooling()<br/>src/llama-graph.h:1131"]
+            GSampl["build_sampling()<br/>src/llama-graph.h:1142"]
+            GDense["build_dense_out()<br/>src/llama-graph.h:1148"]
+        end
+
+        subgraph GraphInputs["Input Tensors (llama-graph.h)"]
+            direction LR
+            IEmb["llm_graph_input_embd<br/>src/llama-graph.h:111"]
+            IPos["llm_graph_input_pos<br/>src/llama-graph.h:143"]
+            IAttnKV["llm_graph_input_attn_kv<br/>src/llama-graph.h:305"]
+            IAttnK["llm_graph_input_attn_k<br/>src/llama-graph.h:347"]
+            IAttnNoCache["llm_graph_input_attn_no_cache<br/>src/llama-graph.h:282"]
+            IOutIds["llm_graph_input_out_ids<br/>src/llama-graph.h:201"]
+            IMean["llm_graph_input_mean<br/>src/llama-graph.h:221"]
+            ICls["llm_graph_input_cls<br/>src/llama-graph.h:233"]
+            IRS["llm_graph_input_rs<br/>src/llama-graph.h:246"]
+            ISampling["llm_graph_input_sampling<br/>src/llama-graph.h:561"]
+        end
+    end
+
+    subgraph ComputeBackend["Compute Backend (ggml)"]
+        direction TB
+        BackendSched["ggml_backend_sched<br/>ggml-backend.h"]
+        BackendCPU["CPU Backend<br/>ggml-cpu"]
+        BackendCUDA["CUDA Backend<br/>ggml-cuda"]
+        BackendMetal["Metal Backend<br/>ggml-metal"]
+        BackendVulkan["Vulkan Backend<br/>ggml-vulkan"]
+        BackendOther["Other Backends<br/>(SYCL, CANN, etc.)"]
+    end
+
+    subgraph BatchProcessing["Batch Processing (src/llama-batch.*)"]
+        direction TB
+        BatchStruct["llama_batch (public)<br/>include/llama.h:240"]
+        UBatchStruct["llama_ubatch (internal)<br/>src/llama-batch.h:15"]
+        BatchAllocr["llama_batch_allocr<br/>src/llama-batch.h:72"]
+        BInit["init()<br/>src/llama-batch.cpp:25<br/>(sanitize + auto-fill)"]
+        BSplit["split_simple / split_equal / split_seq<br/>src/llama-batch.h:103-110"]
+    end
+
+    subgraph MemoryMgmt["Memory / KV Cache (src/llama-memory.* + llama-kv-cache.*)"]
+        direction TB
+        MemI["llama_memory_i (interface)<br/>src/llama-memory.h:73"]
+        KVCache["llama_kv_cache<br/>src/llama-kv-cache.h:20"]
+        KVCtx["llama_kv_cache_context<br/>src/llama-kv-cache.h"]
+        MemRecurr["llama_memory_recurrent<br/>src/llama-memory-recurrent.h"]
+        MemHybrid["llama_memory_hybrid<br/>src/llama-memory-hybrid.h"]
+        KVCells["llama_kv_cells<br/>src/llama-kv-cells.h"]
+        SlotFind["find_slot()<br/>src/llama-kv-cache.cpp:907"]
+        InitBatch["init_batch()<br/>src/llama-kv-cache.cpp:711<br/>(split + slot allocation)"]
+        InitFull["init_full()<br/>src/llama-kv-cache.cpp:748<br/>(worst-case reserve)"]
+        CpyKV["cpy_k / cpy_v<br/>src/llama-kv-cache.cpp:1291"]
+    end
+
+    subgraph ModelWeights["Model Weights (src/llama-model.*)"]
+        direction TB
+        ModelStruct["llama_model<br/>src/llama-model.h:522"]
+        LayerStruct["llama_layer (per layer)<br/>src/llama-model.h:223"]
+        HParams["llama_hparams<br/>src/llama-hparams.h:39"]
+        Loader["llama_model_loader<br/>src/llama-model-loader.h"]
+    end
+
+    subgraph Adapters["Adapters (src/llama-adapter.*)"]
+        direction LR
+        LoRA["llama_adapter_lora<br/>include/llama.h:442"]
+        CVec["llama_adapter_cvec<br/>llama-adapter.h"]
+    end
+
+    subgraph Sampling["Sampling (src/llama-sampler.*)"]
+        direction LR
+        SamplerAPI["llama_sampler API<br/>include/llama.h"]
+        BackendSampling["Backend sampling graph nodes<br/>build_sampling()<br/>src/llama-graph.h:1142"]
+    end
+
+    UserCode --> API_init
+    UserCode --> API_batch
+    UserCode --> API_decode
+    UserCode --> API_logits
+    UserCode --> API_embd
+
+    API_init --> CtxCtor
+    API_decode --> CtxDecode
+    API_encode --> CtxEncode
+
+    CtxDecode --> BatchAllocr : init()
+    CtxDecode --> MemoryMgmt : init_batch()
+    CtxDecode --> CtxProcess
+    CtxDecode --> CtxOutputReserve
+    CtxDecode --> CtxGraphCompute
+
+    CtxProcess --> GResult : can_reuse() / reset()
+    CtxProcess --> GBuild : build_graph()
+    CtxProcess --> GResult : set_inputs()
+    CtxProcess --> CtxGraphCompute : graph_compute()
+
+    CtxCtor --> BackendSched
+    CtxCtor --> KVCache : model.create_memory()
+    CtxCtor --> CtxReserve
+
+    CtxReserve --> KVCache : init_full()
+    CtxReserve --> CtxGraphReserve
+    CtxGraphReserve --> GBuild : build_graph() (worst-case)
+    CtxGraphReserve --> BackendSched : reserve / split
+
+    GBuild --> GArch
+    GArch --> GCtx
+    GCtx --> GEmb
+    GCtx --> GPos
+    GCtx --> GQKV
+    GCtx --> GFFN
+    GCtx --> GMoE
+    GCtx --> GAttn
+    GCtx --> GMHA
+    GCtx --> GPool
+    GCtx --> GSampl
+    GCtx --> GDense
+    GCtx --> GResult
+    GCtx --> GParams
+
+    GResult --> GraphInputs : has
+    GAttn --> IAttnKV : uses
+    GAttn --> IAttnNoCache : uses
+    GAttn --> IAttnK : uses
+
+    CtxGraphCompute --> BackendSched : ggml_backend_sched_graph_compute_async
+    BackendSched --> BackendCPU
+    BackendSched --> BackendCUDA
+    BackendSched --> BackendMetal
+    BackendSched --> BackendVulkan
+
+    KVCache --|> MemI
+    KVCache --> KVCells
+    KVCache --> SlotFind
+    KVCache --> InitBatch
+    KVCache --> InitFull
+    KVCache --> CpyKV
+    KVCtx --|> llama_memory_context_i
+
+    ModelStruct --> HParams
+    ModelStruct --> LayerStruct
+    ModelStruct --> Loader
+    ModelStruct --> LoRA : associated
+
+    CtxDecode --> Adapters : set_inputs applies LoRA
+    GCtx --> Adapters : build_lora_mm / build_cvec
+    GResult --> Sampling : t_sampled_logits / t_sampled
+    GSampl --> Sampling : adds sampling graph ops
+
+    style User fill:#e1f5fe
+    style PublicAPI fill:#e8eaf6
+    style ContextMgmt fill:#f3e5f5
+    style GraphBuilder fill:#fff3e0
+    style ComputeBackend fill:#e0f2f1
+    style BatchProcessing fill:#fce4ec
+    style MemoryMgmt fill:#f1f8e9
+    style ModelWeights fill:#fff9c4
+    style Adapters fill:#efebe9
+    style Sampling fill:#fbe9e7

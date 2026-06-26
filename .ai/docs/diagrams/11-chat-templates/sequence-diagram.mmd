@@ -1,0 +1,178 @@
+sequenceDiagram
+    %% ============================================================================
+    %% 11-Chat-Templates Sequence Diagram
+    %% Data/control flow from common_chat_templates_apply through Jinja rendering
+    %% ============================================================================
+
+    box LightBlue Public API
+        participant Caller as External Caller<br/>(Server / CLI / Test)
+    end
+
+    box LightGreen Template Init & Application
+        participant init as common_chat_templates_init<br/>chat.cpp:707
+        participant apply as common_chat_templates_apply<br/>chat.cpp:2671
+        participant jinja_path as common_chat_templates_apply_jinja<br/>chat.cpp:2474
+        participant legacy_path as common_chat_templates_apply_legacy<br/>chat.cpp:2606
+        participant direct_apply as common_chat_template_direct_apply_impl<br/>chat.cpp:883
+    end
+
+    box Orange Jinja Engine (common/jinja/)
+        participant lexer as jinja::lexer::tokenize<br/>lexer.h:149
+        participant parser_jinja as jinja::parse_from_tokens<br/>parser.h:14
+        participant context as jinja::context<br/>runtime.h:50
+        participant runtime as jinja::runtime::execute<br/>runtime.h:627
+        participant gather as gather_string_parts<br/>runtime.h:636
+    end
+
+    box Red Differential Auto Parser
+        participant analyzer as autoparser::analyze_template<br/>diff-analyzer.cpp
+        participant gen as peg_generator::generate_parser<br/>generator.cpp:33
+        participant peg_builder as build_chat_peg_parser<br/>peg-parser.h:165
+    end
+
+    box Purple PEG Output Parse
+        participant peg_parse as common_chat_peg_parse<br/>chat.cpp:2684
+        participant mapper as common_chat_peg_mapper<br/>peg-parser.h:10
+    end
+
+    box Yellow Specialized Templates
+        participant specialized as common_chat_try_specialized_template<br/>chat.cpp:2389
+        participant ministral as common_chat_params_init_ministral_3<br/>chat.cpp:971
+        participant gptoss as common_chat_params_init_gpt_oss<br/>chat.cpp:1105
+        participant other_specialized as (other per-model handlers)<br/>chat.cpp:1268-2472
+    end
+
+
+    %% ====== Phase 1: Initialization (one-time) ======
+
+    Caller ->> init: common_chat_templates_init(model, override)
+    activate init
+    init ->> init: Read model metadata / override template
+    init ->> init: Read tool_use variant
+    init ->> init: Grab BOS/EOS tokens from vocab
+
+    init ->> lexer: tokenize(template_source)
+    activate lexer
+    lexer -->> init: lexer_result(tokens, source)
+    deactivate lexer
+
+    init ->> parser_jinja: parse_from_tokens(lexer_res)
+    activate parser_jinja
+    parser_jinja -->> init: jinja::program (AST)
+    deactivate parser_jinja
+
+    init -->> common_chat_template: compiled template
+
+    init ->> init: caps_get(prog) -> detect capabilities
+    init -->> Caller: common_chat_templates_ptr
+    deactivate init
+
+
+    %% ====== Phase 2: Template Application (per-request) ======
+
+    Caller ->> apply: common_chat_templates_apply(tmpls, inputs)
+    activate apply
+
+    alt use_jinja == true
+        apply ->> jinja_path: route to Jinja path
+        activate jinja_path
+
+        jinja_path ->> jinja_path: render messages to JSON<br/>(render_message_to_json, chat.cpp:471)
+        jinja_path ->> jinja_path: apply workarounds (role mapping, null content, etc.)
+
+        jinja_path ->> specialized: try_specialized_template(tmpl, src, params)
+        activate specialized
+
+        alt detected specialized model
+            specialized ->> ministral: detected Ministral 3
+            specialized ->> gptoss: detected GPT-OSS
+            specialized ->> other_specialized: other detected model
+            other_specialized ->> other_specialized: produce hardcoded PEG parser + grammar
+            other_specialized -->> specialized: common_chat_params
+            specialized -->> jinja_path: common_chat_params
+            deactivate specialized
+        else no specialized match
+            specialized -->> jinja_path: nullopt
+            deactivate specialized
+
+            jinja_path ->> analyzer: autoparser.analyze_template(tmpl)
+            activate analyzer
+            analyzer ->> direct_apply: apply_template() with probe inputs
+            activate direct_apply
+            direct_apply ->> context: create jinja::context(src)
+            direct_apply ->> context: global_from_json(ctx, input_json, mark_input)
+            direct_apply ->> runtime: runtime.execute(tmpl.prog)
+            activate runtime
+            runtime ->> gather: gather_string_parts(results)
+            gather -->> runtime: value_string with provenance
+            runtime -->> direct_apply: string result
+            deactivate runtime
+            deactivate direct_apply
+            analyzer -->> analyzer: compare diff splits (R1-R3, C1, T1-T5, A1-A3)
+            analyzer -->> jinja_path: populated autoparser
+            deactivate analyzer
+
+            jinja_path ->> gen: peg_generator::generate_parser(tmpl, params, autoparser)
+            activate gen
+
+            gen ->> direct_apply: common_chat_template_direct_apply(tmpl, params)
+            activate direct_apply
+            direct_apply ->> context: create & populate context
+            direct_apply ->> runtime: execute(prog)
+            runtime -->> direct_apply: rendered prompt
+            direct_apply -->> gen: prompt string
+            deactivate direct_apply
+
+            gen ->> gen: autoparser.build_parser(inputs, gen_prompt)
+            gen ->> peg_builder: build_chat_peg_parser(lambda)
+            activate peg_builder
+            peg_builder -->> gen: common_peg_arena (serialized parser)
+            deactivate peg_builder
+
+            gen ->> gen: build grammar for tools (if any)
+            gen -->> jinja_path: common_chat_params (with parser + grammar)
+            deactivate gen
+        end
+
+        jinja_path -->> apply: common_chat_params
+        deactivate jinja_path
+
+    else use_jinja == false (legacy)
+        apply ->> legacy_path: route to legacy path
+        activate legacy_path
+        legacy_path ->> legacy_path: build llama_chat_message array
+        legacy_path ->> legacy_path: llama_chat_apply_template() (C API)
+        legacy_path -->> apply: common_chat_params (prompt only, no parser)
+        deactivate legacy_path
+    end
+
+    apply -->> Caller: common_chat_params (.prompt, .generation_prompt, .parser, etc.)
+    deactivate apply
+
+
+    %% ====== Phase 3: Output Parsing (per-token/stream) ======
+
+    Note over Caller, peg_parse: Later: during inference, model produces output text
+
+    Caller ->> peg_parse: common_chat_peg_parse(input, is_partial, params)
+    activate peg_parse
+
+    peg_parse ->> peg_parse: prepend generation_prompt to input
+    peg_parse ->> peg_parse: parser.parse(ctx) on effective input
+
+    alt parse success
+        peg_parse ->> mapper: from_ast(arena, result)
+        activate mapper
+        mapper ->> mapper: walk AST, extract reasoning/content/tool_calls
+        mapper -->> peg_parse: populated common_chat_msg
+        deactivate mapper
+        peg_parse -->> Caller: common_chat_msg (role, content, tool_calls, etc.)
+    else partial failure (streaming)
+        peg_parse ->> mapper: from_ast(arena, partial result)
+        mapper -->> peg_parse: partial common_chat_msg
+        peg_parse -->> Caller: partial common_chat_msg
+    else full failure
+        peg_parse -->> Caller: throw runtime_error("model produced output does not match expected format")
+    end
+
+    deactivate peg_parse
