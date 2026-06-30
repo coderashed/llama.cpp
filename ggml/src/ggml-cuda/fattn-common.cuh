@@ -659,7 +659,10 @@ static __device__ __forceinline__ void dequantize_V_q2_kvarn(const void * __rest
     }
 }
 
-// Q2_KVARN vec_dot_KQ: dot product of Q2_KVARN K with Q8_1 Q
+// Q2_KVARN vec_dot_KQ: dot product of Q2_KVARN K with Q8_1 Q via DP4A.
+// Formula per group: scale * (Q_ds.x * sumi + d * Q_ds.y / QI8_1)
+// where sumi = dp4a(k2bit_packed, q_int8, 0).
+// The /QI8_1 zeropoint term mirrors q4_1 (fattn-common.cuh line 206).
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q2_kvarn(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
@@ -667,7 +670,6 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q2_kvarn(
     const block_q2_kvarn * K_q2_kvarn = (const block_q2_kvarn *) K_c;
     GGML_UNUSED(Q_v);
 
-    // Each k_KQ covers sizeof(int)=4 elements. QK2_KVARN/sizeof(int) k_KQ values per block.
     constexpr int stride = QK2_KVARN / (int)sizeof(int);
 
     float sum = 0.0f;
@@ -676,27 +678,26 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q2_kvarn(
     for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
         const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
 
-        const int ib       = k_KQ / stride;   // block index
-        const int byte_idx = k_KQ % stride;   // byte within block (4 2-bit values per byte)
+        const int ib       = k_KQ / stride;
+        const int byte_idx = k_KQ % stride;
 
-        const float d  = __half2float(K_q2_kvarn[ib].d);
-        const float s1 = __half2float(K_q2_kvarn[ib].s1);
-        const float s2 = __half2float(K_q2_kvarn[ib].s2);
+        const float d     = __half2float(K_q2_kvarn[ib].d);
+        const float s1    = __half2float(K_q2_kvarn[ib].s1);
+        const float s2    = __half2float(K_q2_kvarn[ib].s2);
         const float scale = s1 * s2;
 
         const uint8_t qbyte = K_q2_kvarn[ib].qs[byte_idx];
 
-        // Unpack 4 Q8_1 quantized Q values for this position
-        const int8_t * q = (const int8_t *) &Q_q8[k_KQ_0/nthreads];
-        const float Q_d = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads].x;
+        // Expand 4 2-bit codes into int8 lanes: values 0-3 are non-negative int8.
+        const int k_packed = (qbyte & 0x03)
+            | (((qbyte >> 2) & 0x03) << 8)
+            | (((qbyte >> 4) & 0x03) << 16)
+            | (((qbyte >> 6) & 0x03) << 24);
 
-        // Dot 4 2-bit K values with 4 Q8 values
-        float dot = 0.0f;
-        for (int b = 0; b < 4; b++) {
-            const float kval = ((float)((qbyte >> (b * 2)) & 0x03) + d) * scale;
-            dot += kval * (float)q[b];
-        }
-        sum += Q_d * dot;
+        const int    sumi = ggml_cuda_dp4a(k_packed, Q_q8[k_KQ_0/nthreads], 0);
+        const float2 Q_ds = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
+
+        sum += scale * (Q_ds.x * sumi + d * Q_ds.y / QI8_1);
     }
 
     return sum;
