@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <cstring>
 #include <vector>
+#include <sys/wait.h>
+#include <unistd.h>
 
 // Test 1: Bit mask correctness
 // Manually construct a block_q2_kvarn with known 2-bit values
@@ -112,15 +114,28 @@ static void test_dual_scale(void) {
 }
 
 // Test 4: Block size invariant
-// Calling with k=64 (not a multiple of 128) must assert.
+// Calling with k=64 (not a multiple of 128) must trip GGML_ASSERT and abort.
+// GGML_ASSERT is always active (not compiled out by NDEBUG), so this is a death
+// test: run the call in a forked child and verify the child aborted instead of
+// exiting cleanly.
 static void test_block_size(void) {
-    uint8_t block[38] = {0};
-    float y[128];
-    const ggml_type_traits * tt = ggml_get_type_traits(GGML_TYPE_Q2_KVARN);
-    // k=64 is not a multiple of 128 -> assert fires
-    tt->to_float(block, y, 64);
-    // If we reach here, the assert did NOT fire (test failure)
-    assert(false && "assert(k % 128 == 0) did not fire");
+    fflush(stdout);
+    fflush(stderr);
+    const pid_t pid = fork();
+    assert(pid >= 0 && "fork failed");
+    if (pid == 0) {
+        // child: this call must abort via GGML_ASSERT(k % 128 == 0)
+        uint8_t block[38] = {0};
+        float y[128];
+        const ggml_type_traits * tt = ggml_get_type_traits(GGML_TYPE_Q2_KVARN);
+        tt->to_float(block, y, 64);
+        // reached only if the assert did NOT fire
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const bool clean_exit = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    assert(!clean_exit && "to_float(k=64) should have aborted via GGML_ASSERT");
 }
 
 int main(void) {
@@ -148,6 +163,6 @@ int main(void) {
     test_block_size();
     printf("PASSED\n");
 
-    printf("\nAll tests passed (BUG: this should not happen)\n");
+    printf("\nAll tests passed\n");
     return 0;
 }

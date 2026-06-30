@@ -180,7 +180,7 @@ static void quantize_q2_kvarn_block(const float * GGML_RESTRICT x, block_q2_kvar
 void quantize_row_q2_kvarn_ref(const float * GGML_RESTRICT x, block_q2_kvarn * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK2_KVARN;
 
-    assert(k % qk == 0);
+    GGML_ASSERT(k % qk == 0);
 
     const int nb = k / qk;
 
@@ -203,7 +203,7 @@ void quantize_row_q2_kvarn_varn(const float * GGML_RESTRICT x, void * GGML_RESTR
         return;
     }
 
-    assert(k % qk == 0);
+    GGML_ASSERT(k % qk == 0);
     const int64_t nb = k / qk;
 
     block_q2_kvarn * GGML_RESTRICT yb = (block_q2_kvarn *)y;
@@ -589,7 +589,7 @@ void dequantize_row_q4_1(const block_q4_1 * GGML_RESTRICT x, float * GGML_RESTRI
 void dequantize_row_q2_kvarn(const block_q2_kvarn * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK2_KVARN;
 
-    assert(k % qk == 0);
+    GGML_ASSERT(k % qk == 0);
 
     const int nb = k / qk;
 
