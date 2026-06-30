@@ -462,6 +462,21 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0;
 
+    // q2_kvarn has no non-contiguous f16 dequantizer: ggml_get_to_fp16_nc_cuda
+    // returns nullptr for it. When K or V is a NON-CONTIGUOUS q2_kvarn view
+    // and a non-VEC kernel (TILE/WMMA/MMA/MFMA) is chosen, launch_fattn takes
+    // the _nc branch and dereferences that NULL -> SIGSEGV.
+    // VEC never converts q2_kvarn (need_f16_K/V stay false for it) and handles
+    // any Q->ne[1], so it is the safe choice. Route non-contiguous q2_kvarn K/V
+    // to VEC, or to NONE (CPU fallback) when the vector kernel does not apply
+    // for this shape. Contiguous q2_kvarn is intentionally NOT guarded here: its
+    // contiguous f16 converter exists, so TILE/MMA are safe and faster -- it
+    // falls through.
+    if ((K->type == GGML_TYPE_Q2_KVARN && !ggml_is_contiguously_allocated(K)) ||
+            (V->type == GGML_TYPE_Q2_KVARN && !ggml_is_contiguously_allocated(V))) {
+        return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
+    }
+
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
         if (can_use_vector_kernel) {
