@@ -222,12 +222,63 @@ static __device__ void quantize_f32_q2_kvarn_block(const float * __restrict__ x,
     }
 
     const float range = max_val - min_val;
-    const float s1 = range / 3.0f;
-    const float inv_s1 = s1 > 0.0f ? 1.0f / s1 : 0.0f;
+    float lo, s1, inv;
+
+    if (range <= 0.0f) {
+        // degenerate block (all elements equal): skip the search and use the
+        // s1=1 / code-0 convention. Dequant reconstructs the constant and s2
+        // restores its magnitude.
+        lo  = min_val;
+        s1  = 1.0f;
+        inv = 1.0f;
+    } else {
+        // MSE-optimal symmetric clip: try a small grid of clip fractions f of
+        // the [min,max] interval and keep the one with the lowest pre-s2
+        // reconstruction MSE. A large outlier wastes code levels at f=1.0, so a
+        // tighter f clips it (it saturates to code 3) and spends resolution on
+        // the bulk.
+        //
+        // Load-bearing invariant: F is iterated with 1.0 FIRST and ties use a
+        // STRICT '<', so f=1.0 wins unless a tighter clip strictly lowers MSE.
+        // When clipping does not help, lo==min and s1==range/3, reproducing the
+        // plain min/max quantizer bit-for-bit. The CPU mirror keeps the same
+        // order and strict compare so both pick the same f.
+        const float F[5]   = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
+        const float center = 0.5f * (min_val + max_val);
+        float best_mse = FLT_MAX;
+        float best_f   = 1.0f;
+
+        for (int fi = 0; fi < 5; fi++) {
+            const float f     = F[fi];
+            const float half  = 0.5f * f * range;
+            const float lo_f  = center - half;
+            const float s1_f  = f * range / 3.0f;
+            const float inv_f = 1.0f / s1_f;
+
+            float mse = 0.0f;
+            for (int j = 0; j < QK2_KVARN; j++) {
+                float val = (x[j] - lo_f) * inv_f;
+                val = fminf(fmaxf(val, 0.0f), 3.0f);
+                const float q  = (float)(uint8_t)(val + 0.5f);
+                const float r  = q * s1_f + lo_f;
+                const float d_ = x[j] - r;
+                mse += d_ * d_;
+            }
+            if (mse < best_mse) {
+                best_mse = mse;
+                best_f   = f;
+            }
+        }
+
+        const float half = 0.5f * best_f * range;
+        lo  = center - half;
+        s1  = best_f * range / 3.0f;
+        inv = 1.0f / s1;
+    }
 
     // store the zeropoint in quantized units so that dequant (qval + d) * s1
-    // reconstructs qval * s1 + min_val exactly
-    const float zp = min_val * inv_s1;
+    // reconstructs qval * s1 + lo exactly
+    const float zp = lo * inv;
 
     y->d  = __float2half(zp);
     y->s1 = __float2half(s1);
@@ -235,7 +286,7 @@ static __device__ void quantize_f32_q2_kvarn_block(const float * __restrict__ x,
     for (int j = 0; j < QK2_KVARN / 4; ++j) {
         uint8_t byte = 0;
         for (int b = 0; b < 4; ++b) {
-            float val = (x[j*4 + b] - min_val) * inv_s1;
+            float val = (x[j*4 + b] - lo) * inv;
             val = fminf(fmaxf(val, 0.0f), 3.0f);
             byte |= ((uint8_t)(val + 0.5f)) << (b * 2);
         }

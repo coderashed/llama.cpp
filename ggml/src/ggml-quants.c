@@ -95,23 +95,75 @@ static float compute_s2_scale(const float * x, const uint8_t * qs, int qk, float
 static void quantize_q2_kvarn_block(const float * GGML_RESTRICT x, block_q2_kvarn * GGML_RESTRICT y) {
     static const int qk = QK2_KVARN;
 
-    float min = FLT_MAX;
-    float max = -FLT_MAX;
+    float min_val = FLT_MAX;
+    float max_val = -FLT_MAX;
 
     for (int j = 0; j < qk; j++) {
         const float v = x[j];
-        if (v < min) min = v;
-        if (v > max) max = v;
+        if (v < min_val) min_val = v;
+        if (v > max_val) max_val = v;
     }
 
-    const float range = max - min;
-    const float half_range = range / 3.0f;
-    const float inv_d = half_range > 0.0f ? 1.0f / half_range : 1.0f;
+    const float range = max_val - min_val;
+    float lo, s1, inv;
+
+    if (range <= 0.0f) {
+        // degenerate block (all elements equal): skip the search and use the
+        // s1=1 / code-0 convention. Dequant reconstructs the constant and s2
+        // restores its magnitude.
+        lo  = min_val;
+        s1  = 1.0f;
+        inv = 1.0f;
+    } else {
+        // MSE-optimal symmetric clip: try a small grid of clip fractions f of
+        // the [min,max] interval and keep the one with the lowest pre-s2
+        // reconstruction MSE. A large outlier wastes code levels at f=1.0, so a
+        // tighter f clips it (it saturates to code 3) and spends resolution on
+        // the bulk.
+        //
+        // Load-bearing invariant: F is iterated with 1.0 FIRST and ties use a
+        // STRICT '<', so f=1.0 wins unless a tighter clip strictly lowers MSE.
+        // When clipping does not help, lo==min and s1==range/3, reproducing the
+        // plain min/max quantizer bit-for-bit. The CUDA mirror keeps the same
+        // order and strict compare so both pick the same f.
+        static const float F[5] = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
+        const float center = 0.5f * (min_val + max_val);
+        float best_mse = FLT_MAX;
+        float best_f   = 1.0f;
+
+        for (int fi = 0; fi < 5; fi++) {
+            const float f     = F[fi];
+            const float half  = 0.5f * f * range;
+            const float lo_f  = center - half;
+            const float s1_f  = f * range / 3.0f;
+            const float inv_f = 1.0f / s1_f;
+
+            float mse = 0.0f;
+            for (int j = 0; j < qk; j++) {
+                float val = (x[j] - lo_f) * inv_f;
+                if (val < 0.0f) val = 0.0f;
+                if (val > 3.0f) val = 3.0f;
+                const float q  = (float)(uint8_t)(val + 0.5f);
+                const float r  = q * s1_f + lo_f;
+                const float d_ = x[j] - r;
+                mse += d_ * d_;
+            }
+            if (mse < best_mse) {
+                best_mse = mse;
+                best_f   = f;
+            }
+        }
+
+        const float half = 0.5f * best_f * range;
+        lo  = center - half;
+        s1  = best_f * range / 3.0f;
+        inv = 1.0f / s1;
+    }
 
     for (int j = 0; j < qk / 4; j++) {
         uint8_t byte = 0;
         for (int b = 0; b < 4; b++) {
-            float val = (x[j*4 + b] - min) * inv_d;
+            float val = (x[j*4 + b] - lo) * inv;
             if (val < 0) val = 0;
             if (val > 3) val = 3;
             byte |= ((uint8_t)(val + 0.5f)) << (b * 2);
@@ -120,9 +172,9 @@ static void quantize_q2_kvarn_block(const float * GGML_RESTRICT x, block_q2_kvar
     }
 
     // store the zeropoint in quantized units so that dequant (qval + d) * s1
-    // reconstructs qval * half_range + min exactly
-    y->d  = GGML_FP32_TO_FP16(min * inv_d);
-    y->s1 = GGML_FP32_TO_FP16(half_range);
+    // reconstructs qval * s1 + lo exactly
+    y->d  = GGML_FP32_TO_FP16(lo * inv);
+    y->s1 = GGML_FP32_TO_FP16(s1);
 }
 
 void quantize_row_q2_kvarn_ref(const float * GGML_RESTRICT x, block_q2_kvarn * GGML_RESTRICT y, int64_t k) {
