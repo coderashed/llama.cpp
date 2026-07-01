@@ -697,6 +697,15 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_q2_kvarn,
         .from_float_ref           = (ggml_from_float_t) quantize_row_q2_kvarn_ref,
     },
+    [GGML_TYPE_Q2_KVARN_K] = {
+        .type_name                = "q2_kvarn_k",
+        .blck_size                = QG2_KVARN,
+        .type_size                = sizeof(block_q2_kvarn_k),
+        .is_quantized             = true,
+        // to_float only: the per-channel body is written by an explicit tile
+        // kernel in cpy_k (Phase B), never the generic row-wise from_float path.
+        .to_float                 = (ggml_to_float_t) dequantize_row_q2_kvarn_k_ggml,
+    },
     [GGML_TYPE_Q4_0] = {
         .type_name                = "q4_0",
         .blck_size                = QK4_0,

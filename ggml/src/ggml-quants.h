@@ -28,6 +28,10 @@ GGML_API void quantize_row_q2_kvarn_k_ref(const float * GGML_RESTRICT tile,
     block_q2_kvarn_k * GGML_RESTRICT out, int n_ch, int n_tok);
 GGML_API void dequantize_row_q2_kvarn_k(const block_q2_kvarn_k * GGML_RESTRICT blocks,
     float * GGML_RESTRICT tile, int n_ch, int n_tok);
+// ggml to_float adapter: one block = QG2_KVARN tokens of one channel, so k must be
+// a multiple of QG2_KVARN. Consecutive blocks are consecutive channels (channel-major).
+GGML_API void dequantize_row_q2_kvarn_k_ggml(const void * GGML_RESTRICT x,
+    float * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q4_1_ref(const float * GGML_RESTRICT x, block_q4_1 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q5_0_ref(const float * GGML_RESTRICT x, block_q5_0 * GGML_RESTRICT y, int64_t k);
