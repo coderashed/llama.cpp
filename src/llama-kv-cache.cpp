@@ -1415,6 +1415,15 @@ ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q
         return nullptr;
     }
 
+    // The fused KVARN_FA kernel is capped at head_dim <= 128 (kvarn-fa.cu + supports_op).
+    // For larger head_dim (e.g. 256 on Qwen3-35B / gemma) it has no GPU instance AND no CPU
+    // fallback, so emitting the op would leave it with no backend -> ggml_backend_sched
+    // aborts. Fall back to the reconstruct path (which handles any head_dim). q is
+    // [head_dim, n_head, n_tok].
+    if (q->ne[0] > 128) {
+        return nullptr;
+    }
+
     const int32_t ikv = map_layer_ids.at(il);
     const kv_layer & layer = layers[ikv];
     if (!layer.k_body) {
@@ -1440,8 +1449,11 @@ ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q
 
     ggml_tensor * qc   = ggml_cont(ctx, q);                               // [head_dim, n_head, n_tok]
     // V is q4_0; dup q4_0 -> F16 directly is unsupported on the CPU backend, so go via
-    // F32 (quant -> F32 and F32 -> F16 are supported on both backends).
-    ggml_tensor * vf16 = ggml_cont(ctx, ggml_cast(ctx, ggml_cast(ctx, v, GGML_TYPE_F32), GGML_TYPE_F16));
+    // F32 (quant -> F32 and F32 -> F16 are supported on both backends). get_v may already
+    // return F16 for the reconstruct path (K/V type-match for flash-attn); skip if so.
+    ggml_tensor * vf16 = v->type == GGML_TYPE_F16
+        ? ggml_cont(ctx, v)
+        : ggml_cont(ctx, ggml_cast(ctx, ggml_cast(ctx, v, GGML_TYPE_F32), GGML_TYPE_F16));
     ggml_tensor * m    = mask->type == GGML_TYPE_F32 ? mask : ggml_cast(ctx, mask, GGML_TYPE_F32);
     m = ggml_cont(ctx, m);
 
@@ -1463,23 +1475,36 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
 
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
+    ggml_tensor * vv;
     if (!v_trans) {
         // note: v->nb[1] <= v->nb[2]
-        return ggml_view_4d(ctx, v,
+        vv = ggml_view_4d(ctx, v,
                 hparams.n_embd_head_v(il), hparams.n_head_kv(il), n_kv, ns,
                 ggml_row_size(v->type, hparams.n_embd_head_v(il)),          // v->nb[1]
                 ggml_row_size(v->type, n_embd_v_gqa),                   // v->nb[2]
                 ggml_row_size(v->type, n_embd_v_gqa*kv_size),           // v->nb[3]
                 ggml_row_size(v->type, n_embd_v_gqa*kv_size)*sinfo.s0);
+    } else {
+        // note: v->nb[1] > v->nb[2]
+        vv = ggml_view_4d(ctx, v,
+                n_kv, hparams.n_head_kv(il), hparams.n_embd_head_v(il), ns,
+                ggml_row_size(v->type, kv_size*hparams.n_embd_head_v(il)),  // v->nb[1]
+                ggml_row_size(v->type, kv_size),                        // v->nb[2]
+                ggml_row_size(v->type, kv_size*n_embd_v_gqa),           // v->nb[3]
+                ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0);
     }
 
-    // note: v->nb[1] > v->nb[2]
-    return ggml_view_4d(ctx, v,
-            n_kv, hparams.n_head_kv(il), hparams.n_embd_head_v(il), ns,
-            ggml_row_size(v->type, kv_size*hparams.n_embd_head_v(il)),  // v->nb[1]
-            ggml_row_size(v->type, kv_size),                        // v->nb[2]
-            ggml_row_size(v->type, kv_size*n_embd_v_gqa),           // v->nb[3]
-            ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0);
+    // KVARN_FAITHFUL: get_k reconstructs K to F16, but V here is quantized (q4_0). The
+    // CUDA/HIP flash-attn kernel requires K->type == V->type (fattn.cu get_best_fattn_kernel
+    // returns NONE for a non-q2_kvarn type mismatch), so a mismatched K=F16/V=q4_0 forces
+    // ALL attention onto the CPU backend. Cast V to F16 to match reconstructed K and keep
+    // flash-attn on the GPU. q4_0 -> F16 direct dup is unsupported, so go via F32.
+    static const bool kvarn_perchannel_read = getenv("LLAMA_KVARN_PERCHANNEL_READ") != nullptr;
+    if (kvarn_perchannel_read && layers[ikv].k_body && ggml_is_quantized(vv->type)) {
+        vv = ggml_cont(ctx, ggml_cast(ctx, ggml_cast(ctx, vv, GGML_TYPE_F32), GGML_TYPE_F16));
+    }
+
+    return vv;
 }
 
 ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
