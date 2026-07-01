@@ -116,6 +116,74 @@ static void assert_matches_ref(const std::vector<block_q2_kvarn_k> & got,
     }
 }
 
+// Reconstruction recipe test: mirror get_k. Quantize a known standard-layout K
+// [C, P] into k_body [G, C, n_groups] (per group: channels' tokens -> blocks),
+// then apply cast(F32) -> permute(1,0,2,3) -> cont -> reshape [C, P] and assert
+// it recovers dequantize_row_q2_kvarn_k arranged in standard [channel, position].
+static void test_reconstruction(ggml_backend_t backend, const char * name) {
+    const int C = 8;    // channels
+    const int G = 128;  // group size
+    const int NG = 3;   // groups
+    const int P = G*NG; // positions
+
+    // Known standard-layout K [C, P] (channel-major: element (c,p) at c + p*C? no:
+    // ggml [C, P] has C fastest -> element (c,p) at c + p*C). Build a recognizable
+    // pattern where each (c,p) is distinct.
+    std::vector<float> Kstd(C * P);
+    for (int p = 0; p < P; p++)
+        for (int c = 0; c < C; c++)
+            Kstd[c + p*C] = 0.02f * (float)(((c*131 + p*17) % 61) - 30);
+
+    // Build k_body: for group g, ref-quantize the [C, G] channel-major tile
+    // (channel c's G tokens) into C blocks. Tile row c = Kstd channel c, tokens
+    // [g*G, g*G+G): value at Kstd[c + (g*G+t)*C].
+    std::vector<block_q2_kvarn_k> body(C * NG);
+    std::vector<float> tile(C * G);
+    for (int g = 0; g < NG; g++) {
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < G; t++)
+                tile[c*G + t] = Kstd[c + (g*G + t)*C];
+        quantize_row_q2_kvarn_k_ref(tile.data(), &body[g*C], C, G); // C blocks for this group
+    }
+
+    // Reference reconstruction: dequant each block into standard [C, P].
+    std::vector<float> ref(C * P);
+    std::vector<float> dqg(C * G);
+    for (int g = 0; g < NG; g++) {
+        dequantize_row_q2_kvarn_k(&body[g*C], dqg.data(), C, G); // dqg[c*G + t]
+        for (int c = 0; c < C; c++)
+            for (int t = 0; t < G; t++)
+                ref[c + (g*G + t)*C] = dqg[c*G + t];
+    }
+
+    // ggml recipe (mirrors get_k): k_body [G, C, NG] -> cast F32 -> permute -> reshape.
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead()*8 + ggml_graph_overhead(),
+        /*.mem_buffer =*/ NULL, /*.no_alloc =*/ true,
+    };
+    struct ggml_context * ctx = ggml_init(params);
+    struct ggml_tensor * kb = ggml_new_tensor_3d(ctx, GGML_TYPE_Q2_KVARN_K, G, C, NG);
+    struct ggml_tensor * D  = ggml_cast(ctx, kb, GGML_TYPE_F32);              // [G, C, NG]
+    struct ggml_tensor * Dp = ggml_cont(ctx, ggml_permute(ctx, D, 1, 0, 2, 3)); // [C, G, NG]
+    struct ggml_tensor * K2 = ggml_reshape_2d(ctx, Dp, C, G*NG);            // [C, P]
+    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, K2);
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    assert(buf != NULL);
+    ggml_backend_tensor_set(kb, body.data(), 0, ggml_nbytes(kb));
+    assert(ggml_backend_graph_compute(backend, gf) == GGML_STATUS_SUCCESS);
+    std::vector<float> got(C * P);
+    ggml_backend_tensor_get(K2, got.data(), 0, sizeof(float)*C*P);
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+
+    for (int i = 0; i < C*P; i++) {
+        const float d = got[i] - ref[i];
+        assert((d < 0 ? -d : d) <= 1e-4f * (1.0f + (ref[i] < 0 ? -ref[i] : ref[i])));
+    }
+    printf("  reconstruction on %s: PASSED\n", name);
+}
+
 int main(void) {
     ggml_cpu_init();
     printf("test-q2-kvarn-k-cpy:\n");
@@ -186,6 +254,18 @@ int main(void) {
             ggml_backend_free(gpu);
             printf("PASSED\n");
         }
+    }
+#endif
+
+    {
+        ggml_backend_t cpu = ggml_backend_cpu_init();
+        test_reconstruction(cpu, "CPU backend");
+        ggml_backend_free(cpu);
+    }
+#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP)
+    {
+        ggml_backend_t gpu = ggml_backend_cuda_init(0);
+        if (gpu) { test_reconstruction(gpu, "CUDA/HIP backend"); ggml_backend_free(gpu); }
     }
 #endif
 
