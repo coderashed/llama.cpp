@@ -384,6 +384,13 @@ static __device__ void quantize_f32_q2_kvarn_k_block(
     }
 }
 
+// cpy block adapter: the source row is one channel's QG2_KVARN contiguous tokens
+// (the write path transposes each K group to channel-major first), so one block
+// = one channel. Mirrors cpy_blck_f32_q2_kvarn (per-token).
+static __device__ void cpy_blck_f32_q2_kvarn_k(const char * cxi, char * cdsti) {
+    quantize_f32_q2_kvarn_k_block((const float *)cxi, QG2_KVARN, (block_q2_kvarn_k *)cdsti);
+}
+
 template<typename src_t, typename dst_t>
 static __device__ void cpy_1_scalar(const char * cxi, char * cdsti) {
     *(dst_t *) cdsti = ggml_cuda_cast<dst_t>(*(const src_t *) cxi);

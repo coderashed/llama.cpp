@@ -412,6 +412,9 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_Q2_KVARN] = {
         .from_float               = quantize_row_q2_kvarn,
     },
+    [GGML_TYPE_Q2_KVARN_K] = {
+        .from_float               = quantize_row_q2_kvarn_k,
+    },
     [GGML_TYPE_I32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_i32,
     },
