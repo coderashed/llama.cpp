@@ -62,6 +62,12 @@ void quantize_row_q2_kvarn(const float * GGML_RESTRICT x, void * GGML_RESTRICT y
     quantize_row_q2_kvarn_ref(x, (block_q2_kvarn *) y, k);
 }
 
+void quantize_row_q2_kvarn_k(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    // Per-channel K (Phase B): channel-major row, one channel's QG2_KVARN tokens
+    // per block. Delegates to the core adapter.
+    quantize_row_q2_kvarn_k_ref_ggml(x, y, k);
+}
+
 //
 // 2-6 bit quantization in super-blocks
 //
