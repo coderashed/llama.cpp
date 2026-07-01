@@ -430,7 +430,8 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_KVARN = 42,
-        GGML_TYPE_COUNT   = 43,
+        GGML_TYPE_Q2_KVARN_K = 43, // per-channel K (KVarN body), block_q2_kvarn_k
+        GGML_TYPE_COUNT   = 44,
     };
 
     // precision

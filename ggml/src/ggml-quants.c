@@ -5884,3 +5884,10 @@ void dequantize_row_q2_kvarn_k(const block_q2_kvarn_k * GGML_RESTRICT blocks,
         }
     }
 }
+
+void dequantize_row_q2_kvarn_k_ggml(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    // ggml dequant contract: k contiguous elements per row. One block holds
+    // QG2_KVARN tokens of one channel, laid out channel-major.
+    assert(k % QG2_KVARN == 0);
+    dequantize_row_q2_kvarn_k((const block_q2_kvarn_k *) x, y, (int)(k / QG2_KVARN), QG2_KVARN);
+}
