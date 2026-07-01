@@ -2342,6 +2342,9 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
     }
     uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
+    // Headroom for the Phase B/D KVarN per-channel K reconstruction + VarN op
+    // (KVARN_FAITHFUL/03,04): a handful of nodes per layer when the env flags are on.
+    res += 64u*model.hparams.n_layer();
     for (const auto & lora : model.loras) {
         res += lora->get_n_nodes();
     }

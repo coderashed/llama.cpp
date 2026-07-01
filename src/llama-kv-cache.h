@@ -281,6 +281,12 @@ private:
     // pre-computed hadamard martrices
     std::unordered_map<int64_t, std::vector<float>> attn_rot_hadamard;
 
+    // Phase B/D (KVARN_FAITHFUL/04): per-layer VarN scales built by cpy_k_regions
+    // and consumed by get_k in the same forward. S_r is per-channel [C,1,n_groups],
+    // S_c is per-token [1,G,n_groups]; get_k multiplies the reconstruction by both.
+    mutable std::unordered_map<int32_t, ggml_tensor *> kvarn_sr3d;
+    mutable std::unordered_map<int32_t, ggml_tensor *> kvarn_sc3d;
+
     // env: LLAMA_KV_CACHE_DEBUG
     int debug = 0;
 
