@@ -314,6 +314,76 @@ static __device__ void cpy_blck_f32_q2_kvarn(const char * cxi, char * cdsti) {
     quantize_f32_q2_kvarn_block((const float *)cxi, (block_q2_kvarn *)cdsti);
 }
 
+// Per-channel K quantizer device function (Phase A, KVARN_FAITHFUL/03).
+// Quantizes one channel of n_tok tokens into one block_q2_kvarn_k.
+// Mirrors quantize_row_q2_kvarn_k_ref exactly: same 02b MSE-clip grid,
+// same iteration order, same strict-< tie-break.  No s2 term.
+static __device__ void quantize_f32_q2_kvarn_k_block(
+        const float * __restrict__ x, int n_tok,
+        block_q2_kvarn_k * __restrict__ y) {
+    const float F[5] = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
+
+    float min_val =  FLT_MAX;
+    float max_val = -FLT_MAX;
+    for (int j = 0; j < n_tok; j++) {
+        const float v = x[j];
+        if (v < min_val) min_val = v;
+        if (v > max_val) max_val = v;
+    }
+
+    const float range = max_val - min_val;
+    float lo, s, inv;
+
+    if (range <= 0.0f) {
+        lo  = min_val;
+        s   = 1.0f;
+        inv = 1.0f;
+    } else {
+        const float center = 0.5f * (min_val + max_val);
+        float best_mse = FLT_MAX;
+        float best_f   = 1.0f;
+
+        for (int fi = 0; fi < 5; fi++) {
+            const float f     = F[fi];
+            const float half  = 0.5f * f * range;
+            const float lo_f  = center - half;
+            const float s_f   = f * range / 3.0f;
+            const float inv_f = 1.0f / s_f;
+
+            float mse = 0.0f;
+            for (int j = 0; j < n_tok; j++) {
+                float val = fminf(fmaxf((x[j] - lo_f) * inv_f, 0.0f), 3.0f);
+                const float q  = (float)(uint8_t)(val + 0.5f);
+                const float r  = q * s_f + lo_f;
+                const float d_ = x[j] - r;
+                mse += d_ * d_;
+            }
+            if (mse < best_mse) {
+                best_mse = mse;
+                best_f   = f;
+            }
+        }
+
+        const float half = 0.5f * best_f * range;
+        lo  = center - half;
+        s   = best_f * range / 3.0f;
+        inv = 1.0f / s;
+    }
+
+    const float z = lo * inv;
+    y->s = __float2half(s);
+    y->z = __float2half(z);
+
+    for (int j = 0; j < n_tok / 4; j++) {
+        uint8_t byte = 0;
+        for (int b = 0; b < 4; b++) {
+            float val = fminf(fmaxf((x[j*4 + b] - lo) * inv, 0.0f), 3.0f);
+            byte |= ((uint8_t)(val + 0.5f)) << (b * 2);
+        }
+        y->qs[j] = byte;
+    }
+}
+
 template<typename src_t, typename dst_t>
 static __device__ void cpy_1_scalar(const char * cxi, char * cdsti) {
     *(dst_t *) cdsti = ggml_cuda_cast<dst_t>(*(const src_t *) cxi);
