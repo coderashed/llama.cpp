@@ -128,7 +128,9 @@ llama_kv_cache::llama_kv_cache(
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                /*.mem_size   =*/ size_t(2u*(1 + n_stream)*n_layer*ggml_tensor_overhead()),
+                // 2*(1+n_stream) per layer (k, v + their per-stream views), plus up to
+                // 3 Phase B per-channel K region tensors (k_sink/k_body/k_recent).
+                /*.mem_size   =*/ size_t((2u*(1 + n_stream) + 3u)*n_layer*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -256,15 +258,31 @@ llama_kv_cache::llama_kv_cache(
         ggml_tensor * v_body   = nullptr;
         ggml_tensor * v_recent = nullptr;
 
-        // TODO: three-region layout (sink/body/recent) is not yet wired into the
-        // read/write path. For now, use a single Q2_KVARN tensor like other
-        // quantized types. The region tensors remain NULL.
+        // The single k tensor remains the authoritative K storage and read path.
         {
             k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
             v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
             has_k && ggml_format_name(k, "cache_k_l%d", il);
             has_v && ggml_format_name(v, "cache_v_l%d", il);
+        }
+
+        // Phase B (KVARN_FAITHFUL/03): per-channel three-region K storage. BODY holds
+        // complete G=128-token groups quantized per-channel (block_q2_kvarn_k); RECENT
+        // holds the FP16 tail that has not yet filled a group. SINK is disabled (N=0)
+        // for the prototype. These are populated by cpy_k and consumed by the region
+        // merge FA read (later steps); for now the single k tensor above stays live.
+        if (is_kvarn) {
+            const int64_t n_groups = (kv_size + KVARN_GROUP_SIZE - 1) / KVARN_GROUP_SIZE;
+
+            // BODY: [G tokens, channels, groups]. Writing group g is the
+            // [G, n_embd_k_gqa] view that the F32 -> Q2_KVARN_K cpy op produces.
+            k_body = ggml_new_tensor_3d(ctx, GGML_TYPE_Q2_KVARN_K, KVARN_GROUP_SIZE, n_embd_k_gqa, n_groups);
+            // RECENT: FP16, one G-sized rolling window of un-quantized tokens.
+            k_recent = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_k_gqa, KVARN_GROUP_SIZE);
+
+            ggml_format_name(k_body,   "cache_k_body_l%d",   il);
+            ggml_format_name(k_recent, "cache_k_recent_l%d", il);
         }
 
         std::vector<ggml_tensor *> k_stream;
@@ -1845,6 +1863,10 @@ size_t llama_kv_cache::size_k_bytes() const {
 
     for (const auto & layer : layers) {
         size_k_bytes += ggml_nbytes(layer.k);
+        // Phase B per-channel K regions (KVARN_FAITHFUL/03), when allocated.
+        size_k_bytes += layer.k_body   ? ggml_nbytes(layer.k_body)   : 0;
+        size_k_bytes += layer.k_recent ? ggml_nbytes(layer.k_recent) : 0;
+        size_k_bytes += layer.k_sink   ? ggml_nbytes(layer.k_sink)   : 0;
     }
 
     return size_k_bytes;

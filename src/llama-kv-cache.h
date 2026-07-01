@@ -8,6 +8,10 @@
 #include <unordered_map>
 #include <vector>
 
+// KVarN per-channel K group size G (paper default). Must match QG2_KVARN, the
+// block_q2_kvarn_k token count in ggml-common.h (not on this include path).
+static constexpr uint32_t KVARN_GROUP_SIZE = 128;
+
 // trigger group quantization when recent region reaches G tokens
 inline bool kvarn_group_trigger(uint32_t n_recent, uint32_t group_size) {
     return n_recent >= group_size;
