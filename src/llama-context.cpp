@@ -237,7 +237,8 @@ llama_context::llama_context(
         // freezes those offsets and every decode step clobbers the same recent slot,
         // corrupting generation. Until the offsets are made data-driven, force a fresh
         // graph each forward when this prototype path is active.
-        if (getenv("LLAMA_KVARN_PERCHANNEL_READ") && !graph_reuse_disable) {
+        const char * LLAMA_KVARN_PERCHANNEL_READ = getenv("LLAMA_KVARN_PERCHANNEL_READ");
+        if (LLAMA_KVARN_PERCHANNEL_READ && atoi(LLAMA_KVARN_PERCHANNEL_READ) != 0 && !graph_reuse_disable) {
             graph_reuse_disable = true;
             LLAMA_LOG_WARN("%s: graph reuse disabled (KVarN per-channel read path)\n", __func__);
         }
