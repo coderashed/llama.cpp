@@ -2109,7 +2109,9 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             break;
         case GGML_OP_KVARN_FA:
             {
-                ggml_compute_forward_kvarn_fa(params, tensor);
+                // CUDA/HIP only (reads channel-major block_q2_kvarn_k); CPU supports_op
+                // returns false so sched never places it here.
+                GGML_ABORT("GGML_OP_KVARN_FA has no CPU implementation (CUDA/HIP only)");
             }
             break;
         case GGML_OP_CROSS_ENTROPY_LOSS:
