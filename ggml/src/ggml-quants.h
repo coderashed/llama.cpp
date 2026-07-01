@@ -17,6 +17,16 @@ extern "C" {
 GGML_API void quantize_row_q1_0_ref(const float * GGML_RESTRICT x, block_q1_0 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q2_kvarn_ref(const float * GGML_RESTRICT x, block_q2_kvarn * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q2_kvarn_varn(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k, const float * GGML_RESTRICT S_c, const float * GGML_RESTRICT S_r);
+
+// Phase A: per-channel K quantizer (tile interface, KVARN_FAITHFUL/03).
+// tile is channel-major [n_ch x n_tok]; each row is one channel across n_tok tokens.
+// out has n_ch blocks, one per channel.  n_tok must equal QG2_KVARN (128).
+// Uses the same MSE-clip grid as 02b (F={1.0,0.9,0.8,0.7,0.6}) but applied
+// over tokens (axis) instead of head-dim channels.  No s2 norm-match term (K only).
+GGML_API void quantize_row_q2_kvarn_k_ref(const float * GGML_RESTRICT tile,
+    block_q2_kvarn_k * GGML_RESTRICT out, int n_ch, int n_tok);
+GGML_API void dequantize_row_q2_kvarn_k(const block_q2_kvarn_k * GGML_RESTRICT blocks,
+    float * GGML_RESTRICT tile, int n_ch, int n_tok);
 GGML_API void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q4_1_ref(const float * GGML_RESTRICT x, block_q4_1 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q5_0_ref(const float * GGML_RESTRICT x, block_q5_0 * GGML_RESTRICT y, int64_t k);

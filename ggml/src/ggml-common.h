@@ -192,6 +192,24 @@ typedef struct {
 } block_q2_kvarn;
 static_assert(sizeof(block_q2_kvarn) == 32 + 2 + 2 + 2, "wrong q2_kvarn block size/padding");
 
+// Phase A: per-channel K block (faithful KVarN build, KVARN_FAITHFUL/03).
+// One block covers ONE channel across a G=128-token group. Storage is
+// CHANNEL-MAJOR: a tile of 128 channels x 128 tokens is 128 of these blocks
+// laid out channel-by-channel (row = channel, not token).
+//
+// Axis difference vs block_q2_kvarn (per-token):
+//   block_q2_kvarn:   qs[32] stores 128 head-dim elements of ONE token.
+//   block_q2_kvarn_k: qs[32] stores 128 token values for ONE channel.
+//
+// bpw: 36 * 8 / 128 = 2.25 (cheaper than per-token 2.375 bpw).
+#define QG2_KVARN 128   /* tokens per per-channel group (G in the KVarN paper) */
+typedef struct {
+    uint8_t   qs[QG2_KVARN / 4]; /* 32 bytes: 128 tokens x 2-bit for this channel */
+    ggml_half s;                 /* per-channel scale (RTN s; folded with VarN S_r in Phase D) */
+    ggml_half z;                 /* per-channel zeropoint in quantized units (z = lo / s) */
+} block_q2_kvarn_k;
+static_assert(sizeof(block_q2_kvarn_k) == 32 + 2 + 2, "wrong q2_kvarn_k block size");
+
 #define QK4_0 32
 typedef struct {
     ggml_half d;           // delta

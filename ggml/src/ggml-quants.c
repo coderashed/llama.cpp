@@ -5775,3 +5775,112 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
 
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Phase A stubs: per-channel K quantizer (KVARN_FAITHFUL/03).
+// These abort at runtime so that RED tests fail.  GREEN replaces the bodies
+// with the MSE-clip grid search over tokens for each channel.
+// ---------------------------------------------------------------------------
+
+void quantize_row_q2_kvarn_k_ref(const float * GGML_RESTRICT tile,
+        block_q2_kvarn_k * GGML_RESTRICT out, int n_ch, int n_tok) {
+    // Per-channel MSE-clip quantizer.  Tile is channel-major [n_ch x n_tok].
+    // Reuses the 02b grid (F={1.0,0.9,0.8,0.7,0.6}) applied over the token
+    // axis of each channel.  No s2 norm-match term (K only).
+    // Store: s = scale, z = lo/s (dimensionless zeropoint).
+    // Dequant: (code + z) * s.
+    static const float F[5] = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
+
+    for (int ch = 0; ch < n_ch; ch++) {
+        const float * x = tile + ch * n_tok;
+        block_q2_kvarn_k * blk = &out[ch];
+
+        float min_val =  FLT_MAX;
+        float max_val = -FLT_MAX;
+        for (int j = 0; j < n_tok; j++) {
+            if (x[j] < min_val) min_val = x[j];
+            if (x[j] > max_val) max_val = x[j];
+        }
+
+        const float range = max_val - min_val;
+        float lo, s, inv;
+
+        if (range <= 0.0f) {
+            // degenerate: s=1, z=cval, all codes=0
+            lo  = min_val;
+            s   = 1.0f;
+            inv = 1.0f;
+        } else {
+            // MSE-optimal symmetric clip: same grid discipline as per-token 02b.
+            // f=1.0 wins unless a tighter clip STRICTLY lowers MSE.
+            const float center = 0.5f * (min_val + max_val);
+            float best_mse = FLT_MAX;
+            float best_f   = 1.0f;
+
+            for (int fi = 0; fi < 5; fi++) {
+                const float f     = F[fi];
+                const float half  = 0.5f * f * range;
+                const float lo_f  = center - half;
+                const float s_f   = f * range / 3.0f;
+                const float inv_f = 1.0f / s_f;
+
+                float mse = 0.0f;
+                for (int j = 0; j < n_tok; j++) {
+                    float val = (x[j] - lo_f) * inv_f;
+                    if (val < 0.0f) val = 0.0f;
+                    if (val > 3.0f) val = 3.0f;
+                    const float q  = (float)(uint8_t)(val + 0.5f);
+                    const float r  = q * s_f + lo_f;
+                    const float d_ = x[j] - r;
+                    mse += d_ * d_;
+                }
+                if (mse < best_mse) {
+                    best_mse = mse;
+                    best_f   = f;
+                }
+            }
+
+            const float half = 0.5f * best_f * range;
+            lo  = center - half;
+            s   = best_f * range / 3.0f;
+            inv = 1.0f / s;
+        }
+
+        // z = lo / s = lo * inv (dimensionless zeropoint in quantized units)
+        const float z = lo * inv;
+
+        blk->s = GGML_FP32_TO_FP16(s);
+        blk->z = GGML_FP32_TO_FP16(z);
+
+        for (int j = 0; j < n_tok / 4; j++) {
+            uint8_t byte = 0;
+            for (int b = 0; b < 4; b++) {
+                float val = (x[j*4 + b] - lo) * inv;
+                if (val < 0.0f) val = 0.0f;
+                if (val > 3.0f) val = 3.0f;
+                byte |= ((uint8_t)(val + 0.5f)) << (b * 2);
+            }
+            blk->qs[j] = byte;
+        }
+    }
+}
+
+void dequantize_row_q2_kvarn_k(const block_q2_kvarn_k * GGML_RESTRICT blocks,
+        float * GGML_RESTRICT tile, int n_ch, int n_tok) {
+    // Inverse of quantize_row_q2_kvarn_k_ref.
+    // Dequant: (code + z) * s  per channel.
+    for (int ch = 0; ch < n_ch; ch++) {
+        const block_q2_kvarn_k * blk = &blocks[ch];
+        const float s = GGML_FP16_TO_FP32(blk->s);
+        const float z = GGML_FP16_TO_FP32(blk->z);
+        float * dst = tile + ch * n_tok;
+
+        for (int j = 0; j < n_tok / 4; j++) {
+            const uint8_t byte = blk->qs[j];
+            for (int b = 0; b < 4; b++) {
+                const float code = (float)((byte >> (b * 2)) & 0x03);
+                dst[j*4 + b] = (code + z) * s;
+            }
+        }
+    }
+}
