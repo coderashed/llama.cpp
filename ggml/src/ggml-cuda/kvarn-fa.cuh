@@ -22,3 +22,9 @@ extern "C" void kvarn_fa_group_cuda(const void * Kblocks, const float * Q,
 extern "C" void kvarn_fa_cuda(const void * Kblocks, const float * Q,
         const float * Sr, const float * Sc, const void * V_f16, const float * mask,
         float * O, int head_dim, int n_head, int n_head_kv, int n_tok, int n_kv, float scale);
+
+// Tiled fused FA v2, increment 1 (test scaffolding): coalesced channel-major K tile
+// load+dequant. K = [head_dim] channel-major blocks for one (head, group); Sr [head_dim];
+// Sc [G]; out = [head_dim * T_tile] token-major, out[d*T_tile+tt] = (code+z_d)*s_d*Sr_d*Sc_t.
+extern "C" void kvarn_ktile_load_cuda(const void * K, const float * Sr, const float * Sc,
+        float * out, int head_dim, int G, int t0, int T_tile);
