@@ -147,14 +147,13 @@ static __global__ void kvarn_fa_kernel(
         const float * __restrict__ Sr, const float * __restrict__ Sc,
         const half * __restrict__ V, const float * __restrict__ mask,
         float * __restrict__ O, int head_dim, int n_head, int n_head_kv,
-        int n_tok, int n_kv, float scale) {
+        int n_tok, int n_kv, float scale, int mask_stride) {
     extern __shared__ float sh[];        // [n_kv] scores/probabilities
     const int qt = blockIdx.x;
     const int h  = blockIdx.y;
     const int hk = h / (n_head / n_head_kv);
     const int tx = threadIdx.x;
     const int G  = QG2_KVARN;
-    const int n_groups = n_kv / G;
     const int C  = head_dim * n_head_kv;
 
     const float * Qq = Q + (size_t) head_dim * (h + (size_t) n_head * qt);
@@ -172,7 +171,7 @@ static __global__ void kvarn_fa_kernel(
             acc += Qq[d] * ((float)code + __half2float(b.z)) * (__half2float(b.s) * Srg[d]);
         }
         const float sc_t = Sc[t + (size_t) G * (hk + (size_t) n_head_kv * g)];
-        sh[T] = scale * sc_t * acc + mask[(size_t) T + (size_t) n_kv * qt];
+        sh[T] = scale * sc_t * acc + mask[(size_t) T + (size_t) mask_stride * qt];
     }
     __syncthreads();
 
@@ -223,13 +222,50 @@ extern "C" void kvarn_fa_cuda(const void * Kblocks, const float * Q,
 
     dim3 grid(n_tok, n_head);
     kvarn_fa_kernel<<<grid, 128, n_kv*sizeof(float)>>>(dK, dQ, dSr, dSc, dV, dmask, dO,
-            head_dim, n_head, n_head_kv, n_tok, n_kv, scale);
+            head_dim, n_head, n_head_kv, n_tok, n_kv, scale, n_kv);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(O, dO, (size_t) head_dim*n_head*n_tok*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(dK)); CUDA_CHECK(cudaFree(dQ)); CUDA_CHECK(cudaFree(dSr));
     CUDA_CHECK(cudaFree(dSc)); CUDA_CHECK(cudaFree(dV)); CUDA_CHECK(cudaFree(dmask)); CUDA_CHECK(cudaFree(dO));
+}
+
+// Graph op forward (GGML_OP_KVARN_FA). srcs: q [head_dim,n_head,n_tok] F32,
+// k_body [G,C,n_groups] Q2_KVARN_K, S_r [head_dim,n_head_kv,1,ng], S_c [G,n_head_kv,1,ng],
+// V F16 [head_dim,n_head_kv,n_kv], mask F32 [n_kv_pad,n_tok_pad]. scale in op_params[0].
+// dst F32 [head_dim,n_head,n_tok]. All device tensors; no host round-trip.
+void ggml_cuda_op_kvarn_fa(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * q  = dst->src[0];
+    const ggml_tensor * kb = dst->src[1];
+    const ggml_tensor * sr = dst->src[2];
+    const ggml_tensor * sc = dst->src[3];
+    const ggml_tensor * v  = dst->src[4];
+    const ggml_tensor * mask = dst->src[5];
+    GGML_ASSERT(q->type == GGML_TYPE_F32 && sr->type == GGML_TYPE_F32);
+    GGML_ASSERT(sc->type == GGML_TYPE_F32 && mask->type == GGML_TYPE_F32);
+    GGML_ASSERT(v->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(q) && ggml_is_contiguous(kb));
+    GGML_ASSERT(ggml_is_contiguous(sr) && ggml_is_contiguous(sc) && ggml_is_contiguous(v));
+
+    const int head_dim  = (int) q->ne[0];
+    const int n_head    = (int) q->ne[1];
+    const int n_tok     = (int) q->ne[2];
+    const int n_head_kv = (int) sr->ne[1];
+    const int n_kv      = (int) v->ne[2];
+    const int mask_stride = (int) (mask->nb[1] / sizeof(float));
+    GGML_ASSERT(head_dim <= 128 && (n_kv % QG2_KVARN) == 0 && (n_head % n_head_kv) == 0);
+
+    float scale;
+    memcpy(&scale, dst->op_params, sizeof(float));
+
+    dim3 grid(n_tok, n_head);
+    kvarn_fa_kernel<<<grid, 128, (size_t) n_kv*sizeof(float), ctx.stream()>>>(
+            (const block_q2_kvarn_k *) kb->data, (const float *) q->data,
+            (const float *) sr->data, (const float *) sc->data, (const half *) v->data,
+            (const float *) mask->data, (float *) dst->data,
+            head_dim, n_head, n_head_kv, n_tok, n_kv, scale, mask_stride);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 extern "C" void kvarn_fa_group_cuda(const void * Kblocks, const float * Q,

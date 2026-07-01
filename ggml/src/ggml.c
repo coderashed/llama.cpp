@@ -1096,9 +1096,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 
     "KVARN_VARN",
+    "KVARN_FA",
 };
 
-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
+static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1209,9 +1210,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 
     "kvarn_varn(x)",
+    "kvarn_fa(q,k,sr,sc,v,mask)",
 };
 
-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
+static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6130,6 +6132,39 @@ struct ggml_tensor * ggml_kvarn_varn(
 
     result->op     = GGML_OP_KVARN_VARN;
     result->src[0] = a;
+
+    return result;
+}
+
+// ggml_kvarn_fa
+
+struct ggml_tensor * ggml_kvarn_fa(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k_body,
+        struct ggml_tensor  * s_r,
+        struct ggml_tensor  * s_c,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * mask,
+        float                 scale) {
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(q));
+
+    const int64_t head_dim = q->ne[0];
+    const int64_t n_head   = q->ne[1];
+    const int64_t n_tok    = q->ne[2];
+
+    struct ggml_tensor * result = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_dim, n_head, n_tok, 1);
+
+    ggml_set_op_params(result, &scale, sizeof(scale));
+
+    result->op     = GGML_OP_KVARN_FA;
+    result->src[0] = q;
+    result->src[1] = k_body;
+    result->src[2] = s_r;
+    result->src[3] = s_c;
+    result->src[4] = v;
+    result->src[5] = mask;
 
     return result;
 }

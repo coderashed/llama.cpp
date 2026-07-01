@@ -194,6 +194,14 @@ public:
     // starts on a group boundary.
     std::vector<ggml_tensor *> cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il, const slot_info & sinfo) const;
 
+    // Fused per-channel-K attention (KVARN_FAITHFUL, gated by LLAMA_KVARN_FUSED_FA).
+    // Reads k_body + VarN scales directly via ggml_kvarn_fa instead of reconstructing K.
+    // Returns [head_dim, n_head, n_tok], or nullptr when the fused path does not apply
+    // (env off, non-kvarn, no k_body, non-prefill, or FP16-tail present) -> caller falls
+    // back to get_k reconstruct + build_attn_mha.
+    ggml_tensor * build_kvarn_fa(ggml_context * ctx, ggml_tensor * q, ggml_tensor * v,
+            ggml_tensor * mask, float scale, int32_t il, const slot_info & sinfo) const;
+
     //
     // preparation API
     //
@@ -418,6 +426,10 @@ public:
 
     // Phase B per-channel K region writes (KVARN_FAITHFUL/03); empty for non-Q2_KVARN.
     std::vector<ggml_tensor *> cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const;
+
+    // Fused per-channel-K attention (KVARN_FAITHFUL); nullptr when not applicable.
+    ggml_tensor * build_kvarn_fa(ggml_context * ctx, ggml_tensor * q, ggml_tensor * v,
+            ggml_tensor * mask, float scale, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
     // the indices address the global KV cache (not per stream) - this is not relevant for the user of this API, but

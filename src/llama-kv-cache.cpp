@@ -1354,6 +1354,53 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
             ggml_row_size(k->type, n_embd_k_gqa*kv_size)*sinfo.s0);
 }
 
+ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q, ggml_tensor * v,
+        ggml_tensor * mask, float scale, int32_t il, const slot_info & sinfo) const {
+    // Opt-in on top of the per-channel read + VarN gates. Reads k_body + the VarN
+    // scales stashed this forward by cpy_k_regions, feeding ggml_kvarn_fa (GPU-only).
+    static const bool enabled = getenv("LLAMA_KVARN_FUSED_FA") != nullptr;
+    if (!enabled) {
+        return nullptr;
+    }
+
+    const int32_t ikv = map_layer_ids.at(il);
+    const kv_layer & layer = layers[ikv];
+    if (!layer.k_body) {
+        return nullptr;
+    }
+
+    // Prefill single-stream only, matching the reconstruct path's assumptions.
+    const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
+    if (ns != 1) {
+        return nullptr;
+    }
+
+    auto itr = kvarn_sr3d.find(il);
+    auto itc = kvarn_sc3d.find(il);
+    if (itr == kvarn_sr3d.end() || itc == kvarn_sc3d.end() || !itr->second || !itc->second) {
+        return nullptr;
+    }
+
+    const int64_t G        = KVARN_GROUP_SIZE;
+    const int64_t n_groups = layer.k_body->ne[2];
+
+    // Only the clean case where every key lives in k_body (no FP16 recent tail);
+    // otherwise fall back to reconstruct (which handles the tail via the k tensor).
+    if (v->ne[2] != n_groups*G) {
+        return nullptr;
+    }
+
+    ggml_tensor * qc   = ggml_cont(ctx, q);                               // [head_dim, n_head, n_tok]
+    // V is q4_0; dup q4_0 -> F16 directly is unsupported on the CPU backend, so go via
+    // F32 (quant -> F32 and F32 -> F16 are supported on both backends).
+    ggml_tensor * vf16 = ggml_cont(ctx, ggml_cast(ctx, ggml_cast(ctx, v, GGML_TYPE_F32), GGML_TYPE_F16));
+    ggml_tensor * m    = mask->type == GGML_TYPE_F32 ? mask : ggml_cast(ctx, mask, GGML_TYPE_F32);
+    m = ggml_cont(ctx, m);
+
+    // itr->second [head_dim, n_head_kv, 1, ng] = S_r; itc->second [G, n_head_kv, 1, ng] = S_c.
+    return ggml_kvarn_fa(ctx, qc, layer.k_body, itr->second, itc->second, vf16, m, scale);
+}
+
 ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
 
@@ -2776,6 +2823,11 @@ ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_
 
 std::vector<ggml_tensor *> llama_kv_cache_context::cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const {
     return kv->cpy_k_regions(ctx, k_cur, il, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q, ggml_tensor * v,
+        ggml_tensor * mask, float scale, int32_t il) const {
+    return kv->build_kvarn_fa(ctx, q, v, mask, scale, il, sinfos[i_cur]);
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const {
