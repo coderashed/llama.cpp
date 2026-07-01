@@ -1368,6 +1368,57 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
     return ggml_set_rows(ctx, k, k_cur, k_idxs);
 }
 
+std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il, const slot_info & sinfo) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    const kv_layer & layer = layers[ikv];
+
+    std::vector<ggml_tensor *> roots;
+
+    // Only Q2_KVARN layers have the per-channel regions allocated.
+    if (!layer.k_body || !layer.k_recent) {
+        return roots;
+    }
+
+    const int64_t n_embd_head = k_cur->ne[0];
+    const int64_t n_head      = k_cur->ne[1];
+    const int64_t n_tokens    = k_cur->ne[2];
+    const int64_t n_embd_gqa  = n_embd_head*n_head;
+    const int64_t G           = KVARN_GROUP_SIZE;
+
+    // Prefill-only prototype: require a contiguous batch that starts on a group
+    // boundary so group g maps to a fixed body slot. Decode-time incremental
+    // buffering (partial groups spanning calls) is Phase C; skip regions otherwise
+    // (get_k does not read them yet, so this is safe).
+    if (!sinfo.is_contiguous() || (sinfo.head() % G) != 0) {
+        return roots;
+    }
+    const int64_t base_group = sinfo.head() / G;
+
+    // Merge (head-dim, head) into the channel axis: k_cur -> [n_embd_gqa, n_tokens].
+    ggml_tensor * k2d = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
+
+    // Complete groups: transpose each [n_embd_gqa, G] tile to channel-major
+    // [G, n_embd_gqa] and quantize into the k_body slice for its global group.
+    const int64_t n_full = n_tokens / G;
+    for (int64_t g = 0; g < n_full; ++g) {
+        ggml_tensor * tile = ggml_view_2d(ctx, k2d, n_embd_gqa, G, k2d->nb[1], g*G*k2d->nb[1]);
+        ggml_tensor * tile_cm = ggml_cont(ctx, ggml_transpose(ctx, tile)); // [G, n_embd_gqa] F32
+        ggml_tensor * dst = ggml_view_2d(ctx, layer.k_body, G, n_embd_gqa,
+                layer.k_body->nb[1], (base_group + g)*layer.k_body->nb[2]);
+        roots.push_back(ggml_cpy(ctx, tile_cm, dst)); // F32 -> Q2_KVARN_K (per-channel)
+    }
+
+    // Partial tail (< G tokens): keep FP16 in the rolling recent buffer.
+    const int64_t n_tail = n_tokens - n_full*G;
+    if (n_tail > 0) {
+        ggml_tensor * tail = ggml_view_2d(ctx, k2d, n_embd_gqa, n_tail, k2d->nb[1], n_full*G*k2d->nb[1]);
+        ggml_tensor * dst  = ggml_view_2d(ctx, layer.k_recent, n_embd_gqa, n_tail, layer.k_recent->nb[1], 0);
+        roots.push_back(ggml_cpy(ctx, tail, dst)); // F32 -> F16
+    }
+
+    return roots;
+}
+
 ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const {
     GGML_UNUSED(sinfo);
 
@@ -2639,6 +2690,10 @@ ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) cons
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
     return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur]);
+}
+
+std::vector<ggml_tensor *> llama_kv_cache_context::cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const {
+    return kv->cpy_k_regions(ctx, k_cur, il, sinfos[i_cur]);
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const {

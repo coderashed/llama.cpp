@@ -2782,6 +2782,14 @@ ggml_tensor * llm_graph_context::build_attn(
 
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
         ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
+
+        // Phase B (KVARN_FAITHFUL/03): also write the per-channel K regions from the
+        // rotated F32 k_cur. Separate expands mirror the cpy_k/cpy_v pattern.
+        if (mctx_cur->type_k() == GGML_TYPE_Q2_KVARN) {
+            for (ggml_tensor * w : mctx_cur->cpy_k_regions(ctx0, k_cur, il)) {
+                ggml_build_forward_expand(gf, w);
+            }
+        }
     }
 
     ggml_tensor * kq_mask = inp->get_kq_mask();

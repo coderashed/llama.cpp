@@ -189,6 +189,13 @@ public:
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
 
+    // Phase B (KVARN_FAITHFUL/03): additionally write the per-channel K regions
+    // (k_body complete groups + k_recent FP16 tail) from the rotated F32 k_cur.
+    // Returns the write-root nodes (empty for non-Q2_KVARN); the caller expands
+    // each into the graph. Prefill-only: no-op unless the batch is contiguous and
+    // starts on a group boundary.
+    std::vector<ggml_tensor *> cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il, const slot_info & sinfo) const;
+
     //
     // preparation API
     //
@@ -404,6 +411,9 @@ public:
     //   - v_idxs [n_tokens] or [n_tokens*n_embd_v_gqa] depending if V cache is transposed
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
+
+    // Phase B per-channel K region writes (KVARN_FAITHFUL/03); empty for non-Q2_KVARN.
+    std::vector<ggml_tensor *> cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
     // the indices address the global KV cache (not per stream) - this is not relevant for the user of this API, but
