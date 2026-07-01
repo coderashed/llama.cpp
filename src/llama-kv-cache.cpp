@@ -1,4 +1,5 @@
 #include "llama-kv-cache.h"
+#include "llama-kvarn.h"
 
 #include "llama-impl.h"
 #include "llama-io.h"
@@ -1307,6 +1308,17 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
 
         ggml_tensor * D  = ggml_cast(ctx, layer.k_body, GGML_TYPE_F32);       // [G, C, n_groups]
         ggml_tensor * Dp = ggml_cont(ctx, ggml_permute(ctx, D, 1, 0, 2, 3));  // [C, G, n_groups]
+
+        // Item 04: un-normalize by the VarN scales stashed by cpy_k_regions this
+        // forward. S_r [C,1,ng] broadcasts over tokens; S_c [1,G,ng] over channels.
+        auto itr = kvarn_sr3d.find(il);
+        auto itc = kvarn_sc3d.find(il);
+        if (itr != kvarn_sr3d.end() && itc != kvarn_sc3d.end() && itr->second && itc->second) {
+            GGML_ASSERT(itr->second->ne[2] == n_groups); // prefill: all groups written
+            Dp = ggml_mul(ctx, Dp, itr->second);
+            Dp = ggml_mul(ctx, Dp, itc->second);
+        }
+
         ggml_tensor * K2 = ggml_reshape_2d(ctx, Dp, C, G*n_groups);          // [C, position]
         ggml_tensor * Kf = ggml_cast(ctx, K2, GGML_TYPE_F16);                // FA-friendly
 
@@ -1426,15 +1438,45 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
     // Merge (head-dim, head) into the channel axis: k_cur -> [n_embd_gqa, n_tokens].
     ggml_tensor * k2d = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
 
+    // VarN (item 04) runs only when the per-channel read is enabled (it needs the
+    // scales at read); otherwise quantize the raw rotated tile as before.
+    static const bool kvarn_varn = getenv("LLAMA_KVARN_VARN") != nullptr;
+
     // Complete groups: transpose each [n_embd_gqa, G] tile to channel-major
-    // [G, n_embd_gqa] and quantize into the k_body slice for its global group.
+    // [G, n_embd_gqa]. With VarN on, run kvarn_varn_op to normalize the tile and
+    // emit S_r/S_c, quantize T_norm into k_body, and accumulate the per-group scales
+    // ([C,1,n_full] and [1,G,n_full]) for get_k. Without VarN, quantize the tile.
     const int64_t n_full = n_tokens / G;
+    ggml_tensor * sr3d = nullptr;
+    ggml_tensor * sc3d = nullptr;
     for (int64_t g = 0; g < n_full; ++g) {
         ggml_tensor * tile = ggml_view_2d(ctx, k2d, n_embd_gqa, G, k2d->nb[1], g*G*k2d->nb[1]);
         ggml_tensor * tile_cm = ggml_cont(ctx, ggml_transpose(ctx, tile)); // [G, n_embd_gqa] F32
         ggml_tensor * dst = ggml_view_2d(ctx, layer.k_body, G, n_embd_gqa,
                 layer.k_body->nb[1], (base_group + g)*layer.k_body->nb[2]);
-        roots.push_back(ggml_cpy(ctx, tile_cm, dst)); // F32 -> Q2_KVARN_K (per-channel)
+
+        ggml_tensor * to_quant = tile_cm;
+        if (kvarn_varn) {
+            const int64_t nt = n_embd_gqa*G;
+            ggml_tensor * args[1] = { tile_cm };
+            ggml_tensor * op = ggml_custom_4d(ctx, GGML_TYPE_F32, nt + n_embd_gqa + G, 1, 1, 1,
+                    args, 1, kvarn_varn_op, 1, nullptr);
+            to_quant = ggml_view_2d(ctx, op, G, n_embd_gqa, G*sizeof(float), 0); // T_norm [G, C]
+            ggml_tensor * sr = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_embd_gqa, nt*sizeof(float)), n_embd_gqa, 1, 1);
+            ggml_tensor * sc = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, G, (nt + n_embd_gqa)*sizeof(float)), 1, G, 1);
+            sr3d = sr3d ? ggml_concat(ctx, sr3d, sr, 2) : sr;
+            sc3d = sc3d ? ggml_concat(ctx, sc3d, sc, 2) : sc;
+        }
+        roots.push_back(ggml_cpy(ctx, to_quant, dst)); // F32 -> Q2_KVARN_K (per-channel)
+    }
+    if (kvarn_varn && sr3d) {
+        kvarn_sr3d[il] = sr3d; // [n_embd_gqa, 1, n_full]
+        kvarn_sc3d[il] = sc3d; // [1, G, n_full]
+    } else {
+        kvarn_sr3d.erase(il);
+        kvarn_sc3d.erase(il);
     }
 
     // Partial tail (< G tokens): keep FP16 in the rolling recent buffer.

@@ -2322,6 +2322,10 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         }
     }
 
+    // Headroom for the Phase B/D KVarN per-channel K reconstruction + VarN op
+    // (KVARN_FAITHFUL/03,04): a handful of nodes per layer when the env flags are on.
+    res += 64u*model.hparams.n_layer();
+
     uint32_t n_sampling_nodes = 0;
     uint32_t n_sampling_nodes_max = 0;
     for (const auto & [seq_id, sampler] : sampling.samplers) {
