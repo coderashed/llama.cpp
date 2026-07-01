@@ -1293,6 +1293,31 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
 
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
+    // Phase B (KVARN_FAITHFUL/03): read K from the per-channel body instead of the
+    // per-token k. Gated by env so the same build A/Bs per-token (baseline) vs
+    // per-channel on the PPL harness. Reconstruction (design 5.2 prototype tier):
+    // dequant k_body -> permute channel-major to standard [channel, position] -> F16.
+    const kv_layer & layer = layers[ikv];
+    static const bool kvarn_perchannel_read = getenv("LLAMA_KVARN_PERCHANNEL_READ") != nullptr;
+    if (kvarn_perchannel_read && layer.k_body) {
+        GGML_ASSERT(ns == 1); // prefill-only single-stream prototype
+        const int64_t C        = n_embd_k_gqa;
+        const int64_t G        = KVARN_GROUP_SIZE;
+        const int64_t n_groups = layer.k_body->ne[2];
+
+        ggml_tensor * D  = ggml_cast(ctx, layer.k_body, GGML_TYPE_F32);       // [G, C, n_groups]
+        ggml_tensor * Dp = ggml_cont(ctx, ggml_permute(ctx, D, 1, 0, 2, 3));  // [C, G, n_groups]
+        ggml_tensor * K2 = ggml_reshape_2d(ctx, Dp, C, G*n_groups);          // [C, position]
+        ggml_tensor * Kf = ggml_cast(ctx, K2, GGML_TYPE_F16);                // FA-friendly
+
+        return ggml_view_4d(ctx, Kf,
+                hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_kv, ns,
+                ggml_row_size(Kf->type, hparams.n_embd_head_k(il)),
+                ggml_row_size(Kf->type, C),
+                ggml_row_size(Kf->type, C*(G*n_groups)),
+                0);
+    }
+
     return ggml_view_4d(ctx, k,
             hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_kv, ns,
             ggml_row_size(k->type, hparams.n_embd_head_k(il)),
@@ -1389,6 +1414,10 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
     // boundary so group g maps to a fixed body slot. Decode-time incremental
     // buffering (partial groups spanning calls) is Phase C; skip regions otherwise
     // (get_k does not read them yet, so this is safe).
+    if (getenv("LLAMA_KVARN_DEBUG") && il == 0) {
+        fprintf(stderr, "[kvarn] cpy_k_regions il=0 head=%u n_tokens=%lld contig=%d\n",
+                sinfo.head(), (long long)n_tokens, (int)sinfo.is_contiguous());
+    }
     if (!sinfo.is_contiguous() || (sinfo.head() % G) != 0) {
         return roots;
     }
