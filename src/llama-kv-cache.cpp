@@ -239,6 +239,8 @@ llama_kv_cache::llama_kv_cache(
         ggml_tensor * k_sink   = nullptr;
         ggml_tensor * k_body   = nullptr;
         ggml_tensor * k_recent = nullptr;
+        ggml_tensor * k_sr     = nullptr;
+        ggml_tensor * k_sc     = nullptr;
         ggml_tensor * v_sink   = nullptr;
         ggml_tensor * v_body   = nullptr;
         ggml_tensor * v_recent = nullptr;
@@ -258,16 +260,23 @@ llama_kv_cache::llama_kv_cache(
         // for the prototype. These are populated by cpy_k and consumed by the region
         // merge FA read (later steps); for now the single k tensor above stays live.
         if (is_kvarn) {
-            const int64_t n_groups = (kv_size + KVARN_GROUP_SIZE - 1) / KVARN_GROUP_SIZE;
+            const int64_t n_groups   = (kv_size + KVARN_GROUP_SIZE - 1) / KVARN_GROUP_SIZE;
+            const int64_t head_dim   = hparams.n_embd_head_k(il);
+            const int64_t n_head_kv  = hparams.n_head_kv(il);
 
             // BODY: [G tokens, channels, groups]. Writing group g is the
             // [G, n_embd_k_gqa] view that the F32 -> Q2_KVARN_K cpy op produces.
             k_body = ggml_new_tensor_3d(ctx, GGML_TYPE_Q2_KVARN_K, KVARN_GROUP_SIZE, n_embd_k_gqa, n_groups);
             // RECENT: FP16, one G-sized rolling window of un-quantized tokens.
             k_recent = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_k_gqa, KVARN_GROUP_SIZE);
+            // Persistent VarN scales, one per group (F32; negligible vs the 2-bit body).
+            k_sr = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_head_kv, n_groups);
+            k_sc = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, KVARN_GROUP_SIZE, n_head_kv, n_groups);
 
             ggml_format_name(k_body,   "cache_k_body_l%d",   il);
             ggml_format_name(k_recent, "cache_k_recent_l%d", il);
+            ggml_format_name(k_sr,     "cache_k_sr_l%d",     il);
+            ggml_format_name(k_sc,     "cache_k_sc_l%d",     il);
         }
 
         std::vector<ggml_tensor *> k_stream;
@@ -280,7 +289,7 @@ llama_kv_cache::llama_kv_cache(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_sink, k_body, k_recent, v_sink, v_body, v_recent, k_stream, v_stream });
+        layers.push_back({ il, k, v, k_sink, k_body, k_recent, k_sr, k_sc, v_sink, v_body, v_recent, k_stream, v_stream });
     }
 
     if (reuse) {
@@ -1301,38 +1310,47 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
     const kv_layer & layer = layers[ikv];
     static const bool kvarn_perchannel_read = getenv("LLAMA_KVARN_PERCHANNEL_READ") != nullptr;
     if (kvarn_perchannel_read && layer.k_body) {
-        GGML_ASSERT(ns == 1); // prefill-only single-stream prototype
+        GGML_ASSERT(ns == 1); // single-stream (multi-stream is a later phase)
         const int64_t C        = n_embd_k_gqa;
         const int64_t G        = KVARN_GROUP_SIZE;
-        const int64_t n_groups = layer.k_body->ne[2];
+        const int64_t head_dim = hparams.n_embd_head_k(il);
+        const int64_t n_head   = hparams.n_head_kv(il);
+        // Reconstruct only the groups covering the valid keys, not the full cache
+        // capacity (which for a large context would be enormous). Scales are read from
+        // the persistent per-group caches written by cpy_k_regions (this or an earlier
+        // forward), so decode works, not just cache-sized-to-batch prefill.
+        const int64_t ng = (n_kv + G - 1) / G;
 
-        ggml_tensor * D  = ggml_cast(ctx, layer.k_body, GGML_TYPE_F32);       // [G, C, n_groups]
-        ggml_tensor * Dp = ggml_cont(ctx, ggml_permute(ctx, D, 1, 0, 2, 3));  // [C, G, n_groups]
+        ggml_tensor * body = ggml_view_3d(ctx, layer.k_body, G, C, ng,
+                layer.k_body->nb[1], layer.k_body->nb[2], 0);        // [G, C, ng]
+        ggml_tensor * D  = ggml_cast(ctx, body, GGML_TYPE_F32);              // [G, C, ng]
+        ggml_tensor * Dp = ggml_cont(ctx, ggml_permute(ctx, D, 1, 0, 2, 3)); // [C, G, ng]
 
-        // Item 04: un-normalize by the VarN scales stashed by cpy_k_regions this
-        // forward. S_r [C,1,ng] broadcasts over tokens; S_c [1,G,ng] over channels.
-        auto itr = kvarn_sr3d.find(il);
-        auto itc = kvarn_sc3d.find(il);
-        if (itr != kvarn_sr3d.end() && itc != kvarn_sc3d.end() && itr->second && itc->second) {
-            const int64_t head_dim = hparams.n_embd_head_k(il);
-            const int64_t n_head   = hparams.n_head_kv(il);
-            GGML_ASSERT(itr->second->ne[3] == n_groups); // per-group scales, prefill
-            ggml_tensor * Dp4 = ggml_reshape_4d(ctx, Dp, head_dim, n_head, G, n_groups);
-            Dp4 = ggml_mul(ctx, Dp4, itr->second); // x S_r [head_dim,n_head,1,ng] (over tokens)
-            // S_c [G,n_head,1,ng] -> [1,n_head,G,ng] to broadcast over head_dim.
-            ggml_tensor * scb = ggml_cont(ctx, ggml_permute(ctx, itc->second, 2, 1, 0, 3));
+        static const bool kvarn_varn = getenv("LLAMA_KVARN_VARN") != nullptr;
+        if (kvarn_varn && layer.k_sr && layer.k_sc) {
+            // Persistent scales for these groups: S_r [head_dim,n_head,ng], S_c [G,n_head,ng].
+            ggml_tensor * sr = ggml_view_3d(ctx, layer.k_sr, head_dim, n_head, ng,
+                    layer.k_sr->nb[1], layer.k_sr->nb[2], 0);
+            ggml_tensor * sc = ggml_view_3d(ctx, layer.k_sc, G, n_head, ng,
+                    layer.k_sc->nb[1], layer.k_sc->nb[2], 0);
+            ggml_tensor * Dp4 = ggml_reshape_4d(ctx, Dp, head_dim, n_head, G, ng);
+            // S_r [head_dim,n_head,1,ng] broadcasts over tokens.
+            Dp4 = ggml_mul(ctx, Dp4, ggml_reshape_4d(ctx, sr, head_dim, n_head, 1, ng));
+            // S_c [G,n_head,1,ng] -> [1,n_head,G,ng] broadcasts over channels.
+            ggml_tensor * scb = ggml_cont(ctx, ggml_permute(ctx,
+                    ggml_reshape_4d(ctx, sc, G, n_head, 1, ng), 2, 1, 0, 3));
             Dp4 = ggml_mul(ctx, Dp4, scb);
-            Dp = ggml_reshape_3d(ctx, Dp4, C, G, n_groups);
+            Dp = ggml_reshape_3d(ctx, Dp4, C, G, ng);
         }
 
-        ggml_tensor * K2 = ggml_reshape_2d(ctx, Dp, C, G*n_groups);          // [C, position]
-        ggml_tensor * Kf = ggml_cast(ctx, K2, GGML_TYPE_F16);                // FA-friendly
+        ggml_tensor * K2 = ggml_reshape_2d(ctx, Dp, C, G*ng);               // [C, position]
+        ggml_tensor * Kf = ggml_cast(ctx, K2, GGML_TYPE_F16);              // FA-friendly
 
         return ggml_view_4d(ctx, Kf,
-                hparams.n_embd_head_k(il), hparams.n_head_kv(il), n_kv, ns,
-                ggml_row_size(Kf->type, hparams.n_embd_head_k(il)),
+                head_dim, n_head, n_kv, ns,
+                ggml_row_size(Kf->type, head_dim),
                 ggml_row_size(Kf->type, C),
-                ggml_row_size(Kf->type, C*(G*n_groups)),
+                ggml_row_size(Kf->type, C*(G*ng)),
                 0);
     }
 
@@ -1359,24 +1377,20 @@ ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q
         return nullptr;
     }
 
-    // Prefill single-stream only, matching the reconstruct path's assumptions.
+    // Single-stream only (multi-stream is a later phase).
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
     if (ns != 1) {
         return nullptr;
     }
 
-    auto itr = kvarn_sr3d.find(il);
-    auto itc = kvarn_sc3d.find(il);
-    if (itr == kvarn_sr3d.end() || itc == kvarn_sc3d.end() || !itr->second || !itc->second) {
+    if (!layer.k_sr || !layer.k_sc) {
         return nullptr;
     }
 
-    const int64_t G        = KVARN_GROUP_SIZE;
-    const int64_t n_groups = layer.k_body->ne[2];
-
-    // Only the clean case where every key lives in k_body (no FP16 recent tail);
-    // otherwise fall back to reconstruct (which handles the tail via the k tensor).
-    if (v->ne[2] != n_groups*G) {
+    // Fused FA reads only complete body groups; a partial (recent FP16) tail is not
+    // handled yet, so fall back to reconstruct when n_kv is not group-aligned.
+    const int64_t G = KVARN_GROUP_SIZE;
+    if (v->ne[2] % G != 0) {
         return nullptr;
     }
 
@@ -1387,8 +1401,9 @@ ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q
     ggml_tensor * m    = mask->type == GGML_TYPE_F32 ? mask : ggml_cast(ctx, mask, GGML_TYPE_F32);
     m = ggml_cont(ctx, m);
 
-    // itr->second [head_dim, n_head_kv, 1, ng] = S_r; itc->second [G, n_head_kv, 1, ng] = S_c.
-    return ggml_kvarn_fa(ctx, qc, layer.k_body, itr->second, itc->second, vf16, m, scale);
+    // Persistent scales (full capacity): the kernel indexes groups from 0 over the
+    // v->ne[2] valid keys, so k_body/k_sr/k_sc are passed whole.
+    return ggml_kvarn_fa(ctx, qc, layer.k_body, layer.k_sr, layer.k_sc, vf16, m, scale);
 }
 
 ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
@@ -1500,40 +1515,36 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
     // emit S_r/S_c, quantize T_norm into k_body, and accumulate the per-group scales
     // ([C,1,n_full] and [1,G,n_full]) for get_k. Without VarN, quantize the tile.
     const int64_t n_full = n_tokens / G;
-    ggml_tensor * sr3d = nullptr;
-    ggml_tensor * sc3d = nullptr;
     for (int64_t g = 0; g < n_full; ++g) {
+        const int64_t gg = base_group + g; // absolute group position in the cache
         ggml_tensor * tile = ggml_view_2d(ctx, k2d, n_embd_gqa, G, k2d->nb[1], g*G*k2d->nb[1]);
         ggml_tensor * tile_cm = ggml_cont(ctx, ggml_transpose(ctx, tile)); // [G, n_embd_gqa] F32
         ggml_tensor * dst = ggml_view_2d(ctx, layer.k_body, G, n_embd_gqa,
-                layer.k_body->nb[1], (base_group + g)*layer.k_body->nb[2]);
+                layer.k_body->nb[1], gg*layer.k_body->nb[2]);
 
         ggml_tensor * to_quant = tile_cm;
         if (kvarn_varn) {
-            const int64_t nt     = n_embd_gqa*G;
-            const int64_t sc_len = n_head*G;  // per-head per-token
+            const int64_t nt = n_embd_gqa*G;
             // reshape tile_cm [G, n_embd_gqa] -> [G, head_dim, n_head] for per-head VarN.
             // Real GGML op (runs on GPU); replaces the CPU-only ggml_custom_4d round-trip.
             ggml_tensor * tile3d = ggml_reshape_3d(ctx, tile_cm, G, n_embd_head, n_head);
             ggml_tensor * op = ggml_kvarn_varn(ctx, tile3d);
             to_quant = ggml_view_2d(ctx, op, G, n_embd_gqa, G*sizeof(float), 0); // T_norm [G, C]
-            // S_r [n_embd_gqa] head-major -> [head_dim, n_head, 1, 1]
-            ggml_tensor * sr = ggml_reshape_4d(ctx,
-                    ggml_view_1d(ctx, op, n_embd_gqa, nt*sizeof(float)), n_embd_head, n_head, 1, 1);
-            // S_c [n_head*G] head-major (S_c[h*G+t]) -> [G, n_head, 1, 1]
-            ggml_tensor * sc = ggml_reshape_4d(ctx,
-                    ggml_view_1d(ctx, op, sc_len, (nt + n_embd_gqa)*sizeof(float)), G, n_head, 1, 1);
-            sr3d = sr3d ? ggml_concat(ctx, sr3d, sr, 3) : sr;  // [head_dim, n_head, 1, n_full]
-            sc3d = sc3d ? ggml_concat(ctx, sc3d, sc, 3) : sc;  // [G, n_head, 1, n_full]
+            // S_r [n_embd_gqa] head-major -> [head_dim, n_head, 1]; S_c [n_head*G] -> [G, n_head, 1].
+            ggml_tensor * sr = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_embd_gqa, nt*sizeof(float)), n_embd_head, n_head, 1);
+            ggml_tensor * sc = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_head*G, (nt + n_embd_gqa)*sizeof(float)), G, n_head, 1);
+            // Persist into the per-group scale caches at the absolute group position, so
+            // a later (decode) forward can read scales for groups written earlier.
+            ggml_tensor * sr_dst = ggml_view_3d(ctx, layer.k_sr, n_embd_head, n_head, 1,
+                    layer.k_sr->nb[1], layer.k_sr->nb[2], gg*layer.k_sr->nb[2]);
+            ggml_tensor * sc_dst = ggml_view_3d(ctx, layer.k_sc, G, n_head, 1,
+                    layer.k_sc->nb[1], layer.k_sc->nb[2], gg*layer.k_sc->nb[2]);
+            roots.push_back(ggml_cpy(ctx, sr, sr_dst));
+            roots.push_back(ggml_cpy(ctx, sc, sc_dst));
         }
         roots.push_back(ggml_cpy(ctx, to_quant, dst)); // F32 -> Q2_KVARN_K (per-channel)
-    }
-    if (kvarn_varn && sr3d) {
-        kvarn_sr3d[il] = sr3d; // [head_dim, n_head, 1, n_full]
-        kvarn_sc3d[il] = sc3d; // [G, n_head, 1, n_full]
-    } else {
-        kvarn_sr3d.erase(il);
-        kvarn_sc3d.erase(il);
     }
 
     // Partial tail (< G tokens): keep FP16 in the rolling recent buffer.
