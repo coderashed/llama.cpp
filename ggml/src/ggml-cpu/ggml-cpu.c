@@ -2077,6 +2077,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 ggml_compute_forward_custom(params, tensor);
             }
             break;
+        case GGML_OP_KVARN_VARN:
+            {
+                ggml_compute_forward_kvarn_varn(params, tensor);
+            }
+            break;
         case GGML_OP_CROSS_ENTROPY_LOSS:
             {
                 ggml_compute_forward_cross_entropy_loss(params, tensor);
@@ -2439,6 +2444,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_OPT_STEP_SGD:
             {
                 n_tasks = n_threads;
+            } break;
+        case GGML_OP_KVARN_VARN:
+            {
+                n_tasks = 1;
             } break;
         case GGML_OP_NONE:
             {

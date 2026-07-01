@@ -12,6 +12,7 @@
 // bit-close test, mirroring the Phase A per-channel quantizer pattern.
 
 #include "common.cuh"
+#include "kvarn-varn.cuh"
 
 #define VARN_MAXDIM 128
 #define VARN_VAR_EPS 1e-12
@@ -133,4 +134,33 @@ extern "C" void kvarn_varn_tile_cuda(const float * tiles, float * Tnorm,
     CUDA_CHECK(cudaMemcpy(Sc, dSc, (size_t) n_tiles * C * sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(dTin)); CUDA_CHECK(cudaFree(dTout));
     CUDA_CHECK(cudaFree(dSr));  CUDA_CHECK(cudaFree(dSc));
+}
+
+// Graph op forward (GGML_OP_KVARN_VARN). No host round-trip: src and the packed dst
+// live on the device. One block per head; the kernel writes T_norm/S_r/S_c straight
+// into the packed dst by pointer offset (Sr = dst+nt, Sc = dst+nt+n_ch), which lines
+// up with the head-major CPU custom-op layout because per head the kernel strides are
+// tile*R*C (T_norm), tile*R (S_r) and tile*C (S_c).
+void ggml_cuda_op_kvarn_varn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src = dst->src[0];
+    GGML_ASSERT(src->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src));
+
+    const int n_tok    = (int) src->ne[0];
+    const int head_dim = (int) src->ne[1];
+    const int n_head   = (int) src->ne[2];
+    GGML_ASSERT(head_dim <= VARN_MAXDIM && n_tok <= VARN_MAXDIM);
+
+    const size_t nt   = (size_t) head_dim * n_head * n_tok; // T_norm length (n_ch*n_tok)
+    const size_t n_ch = (size_t) head_dim * n_head;
+
+    const float * src_d = (const float *) src->data;
+    float *       dst_d = (float *)       dst->data;
+    float *       Sr    = dst_d + nt;
+    float *       Sc    = dst_d + nt + n_ch;
+
+    kvarn_varn_tile_kernel<<<n_head, 1, 0, ctx.stream()>>>(
+            src_d, dst_d, Sr, Sc, head_dim, n_tok);
+    CUDA_CHECK(cudaGetLastError());
 }

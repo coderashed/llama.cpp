@@ -28,6 +28,7 @@
 #include "ggml-cuda/fwht.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
+#include "ggml-cuda/kvarn-varn.cuh"
 #include "ggml-cuda/mmf.cuh"
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
@@ -3088,6 +3089,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_CROSS_ENTROPY_LOSS:
             ggml_cuda_cross_entropy_loss(ctx, dst);
             break;
+        case GGML_OP_KVARN_VARN:
+            ggml_cuda_op_kvarn_varn(ctx, dst);
+            break;
         case GGML_OP_TRI:
             ggml_cuda_op_tri(ctx, dst);
             break;
@@ -5463,6 +5467,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_DIAG:
         case GGML_OP_SOLVE_TRI:
             return true;
+        case GGML_OP_KVARN_VARN:
+            return op->src[0]->ne[1] <= 128 && op->src[0]->ne[0] <= 128;
 
         default:
             return false;

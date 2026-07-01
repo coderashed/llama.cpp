@@ -1475,11 +1475,10 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
         if (kvarn_varn) {
             const int64_t nt     = n_embd_gqa*G;
             const int64_t sc_len = n_head*G;  // per-head per-token
-            // reshape tile_cm [G, n_embd_gqa] -> [G, head_dim, n_head] for per-head VarN
+            // reshape tile_cm [G, n_embd_gqa] -> [G, head_dim, n_head] for per-head VarN.
+            // Real GGML op (runs on GPU); replaces the CPU-only ggml_custom_4d round-trip.
             ggml_tensor * tile3d = ggml_reshape_3d(ctx, tile_cm, G, n_embd_head, n_head);
-            ggml_tensor * args[1] = { tile3d };
-            ggml_tensor * op = ggml_custom_4d(ctx, GGML_TYPE_F32, nt + n_embd_gqa + sc_len, 1, 1, 1,
-                    args, 1, kvarn_varn_op, 1, nullptr);
+            ggml_tensor * op = ggml_kvarn_varn(ctx, tile3d);
             to_quant = ggml_view_2d(ctx, op, G, n_embd_gqa, G*sizeof(float), 0); // T_norm [G, C]
             // S_r [n_embd_gqa] head-major -> [head_dim, n_head, 1, 1]
             ggml_tensor * sr = ggml_reshape_4d(ctx,

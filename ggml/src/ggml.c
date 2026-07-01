@@ -1094,9 +1094,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+
+    "KVARN_VARN",
 };
 
-static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1205,9 +1207,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+
+    "kvarn_varn(x)",
 };
 
-static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6107,6 +6111,29 @@ struct ggml_tensor * ggml_custom_inplace(
 
     return result;
 }
+
+// ggml_kvarn_varn
+
+struct ggml_tensor * ggml_kvarn_varn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(a));
+
+    const int64_t n_tok    = a->ne[0];
+    const int64_t head_dim = a->ne[1];
+    const int64_t n_head   = a->ne[2];
+    const int64_t n_ch     = head_dim * n_head;
+    const int64_t total    = n_ch*n_tok + n_ch + n_head*n_tok;
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, total);
+
+    result->op     = GGML_OP_KVARN_VARN;
+    result->src[0] = a;
+
+    return result;
+}
+
 // ggml_cross_entropy_loss
 
 struct ggml_tensor * ggml_cross_entropy_loss(
