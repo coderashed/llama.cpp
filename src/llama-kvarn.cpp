@@ -13,39 +13,110 @@
 #define KVARN_RESTRICT
 #endif
 
-static void kvarn_normalize_columns(float* KVARN_RESTRICT T, float* KVARN_RESTRICT S_c, int R, int C, float c_min, float c_max) {
+// Population variance below this is treated as zero.
+static const double KVARN_VAR_EPS = 1e-12;
+
+// Column pass: for each column j, compute population variance.
+// If variance <= VAR_EPS (uniform column), fall back to (col_mean - tile_mean)^2.
+// If that is also <= VAR_EPS (globally uniform tile), skip (no-op).
+// Otherwise delta = 0.5*log(v); clamp accumulated log-scale; divide column by exp(eff).
+// Invariant: orig[r,c] == T[r,c] * exp(L_c[c]) * exp(L_r[r]) is preserved per step.
+static void kvarn_normalize_columns(
+    float* KVARN_RESTRICT T,
+    float* KVARN_RESTRICT L_c,
+    int R, int C,
+    float c_min, float c_max)
+{
+    // Tile mean for fallback when a column is uniform but differs from the tile average.
+    double tile_mean = 0.0;
+    for (int k = 0; k < R * C; k++) {
+        tile_mean += (double)T[k];
+    }
+    tile_mean /= (double)(R * C);
+
     for (int j = 0; j < C; j++) {
-        double sum_abs = 0.0;
+        double mean = 0.0;
         for (int i = 0; i < R; i++) {
-            sum_abs += (double)std::abs(T[i * C + j]);
+            mean += (double)T[i * C + j];
         }
-        float mean = (float)(sum_abs / (double)R);
-        mean = std::log(mean);
-        mean = std::clamp(mean, c_min, c_max);
-        float scale = std::exp(mean);
+        mean /= (double)R;
+
+        double m2 = 0.0;
+        for (int i = 0; i < R; i++) {
+            double d = (double)T[i * C + j] - mean;
+            m2 += d * d;
+        }
+        double v = m2 / (double)R;
+
+        if (v <= KVARN_VAR_EPS) {
+            // Column is uniform; fall back to squared deviation of mean from tile mean.
+            double dev = mean - tile_mean;
+            v = dev * dev;
+            if (v <= KVARN_VAR_EPS) {
+                // Globally uniform or single-element: pure no-op.
+                continue;
+            }
+        }
+
+        double delta  = 0.5 * std::log(v);
+        float  L_new  = std::clamp((float)((double)L_c[j] + delta), c_min, c_max);
+        float  eff    = L_new - L_c[j];
+        float  f      = std::exp(eff);
 
         for (int i = 0; i < R; i++) {
-            T[i * C + j] -= mean;
+            T[i * C + j] /= f;
         }
-        S_c[j] *= scale;
+        L_c[j] = L_new;
     }
 }
 
-static void kvarn_normalize_rows(float* KVARN_RESTRICT T, float* KVARN_RESTRICT S_r, int R, int C, float c_min, float c_max) {
+// Row pass: symmetric to column pass with rows and L_r.
+static void kvarn_normalize_rows(
+    float* KVARN_RESTRICT T,
+    float* KVARN_RESTRICT L_r,
+    int R, int C,
+    float c_min, float c_max)
+{
+    // Tile mean for fallback when a row is uniform but differs from the tile average.
+    double tile_mean = 0.0;
+    for (int k = 0; k < R * C; k++) {
+        tile_mean += (double)T[k];
+    }
+    tile_mean /= (double)(R * C);
+
     for (int i = 0; i < R; i++) {
-        double sum_abs = 0.0;
+        double mean = 0.0;
         for (int j = 0; j < C; j++) {
-            sum_abs += (double)std::abs(T[i * C + j]);
+            mean += (double)T[i * C + j];
         }
-        float mean = (float)(sum_abs / (double)C);
-        mean = std::log(mean);
-        mean = std::clamp(mean, c_min, c_max);
-        float scale = std::exp(mean);
+        mean /= (double)C;
+
+        double m2 = 0.0;
+        for (int j = 0; j < C; j++) {
+            double d = (double)T[i * C + j] - mean;
+            m2 += d * d;
+        }
+        double v = m2 / (double)C;
+
+        if (v <= KVARN_VAR_EPS) {
+            // Row is uniform; fall back to squared deviation of mean from tile mean.
+            double dev = mean - tile_mean;
+            v = dev * dev;
+            if (v <= KVARN_VAR_EPS) {
+                // Globally uniform or single-element: pure no-op.
+                continue;
+            }
+        }
+
+        double delta  = 0.5 * std::log(v);
+        float  L_new  = std::clamp((float)((double)L_r[i] + delta), c_min, c_max);
+        float  eff    = L_new - L_r[i];
+        float  f      = std::exp(eff);
 
         for (int j = 0; j < C; j++) {
-            T[i * C + j] -= mean;
+            T[i * C + j] /= f;
         }
-        S_r[i] *= scale;
+        L_r[i] = L_new;
     }
 }
 
@@ -89,28 +160,36 @@ void kvarn_variance_normalize(
         return;
     }
 
-    for (int j = 0; j < C; j++) S_c[j] = 1.0f;
-    for (int i = 0; i < R; i++) S_r[i] = 1.0f;
+    // Log-domain accumulated scales; S_c[j] = exp(L_c[j]), S_r[i] = exp(L_r[i]).
+    std::vector<float> L_c(C, 0.0f);
+    std::vector<float> L_r(R, 0.0f);
 
+    // Best-state snapshot: T, L_c, L_r must be snapshotted together to preserve invariant.
     std::vector<float> best_T(R * C);
-    std::vector<float> best_S_c(C);
-    std::vector<float> best_S_r(R);
+    std::vector<float> best_L_c(C, 0.0f);
+    std::vector<float> best_L_r(R, 0.0f);
     float best_Imb = FLT_MAX;
 
     for (int iter = 0; iter < K; iter++) {
-        kvarn_normalize_columns(T, S_c, R, C, c_min, c_max);
-        kvarn_normalize_rows(T, S_r, R, C, c_min, c_max);
+        kvarn_normalize_columns(T, L_c.data(), R, C, c_min, c_max);
+        kvarn_normalize_rows(T, L_r.data(), R, C, c_min, c_max);
 
         float curr_Imb = kvarn_imb_metric(T, R, C);
         if (curr_Imb < best_Imb) {
             best_Imb = curr_Imb;
-            std::memcpy(best_T.data(), T, (size_t)R * C * sizeof(float));
-            std::memcpy(best_S_c.data(), S_c, (size_t)C * sizeof(float));
-            std::memcpy(best_S_r.data(), S_r, (size_t)R * sizeof(float));
+            std::memcpy(best_T.data(),   T,          (size_t)R * C * sizeof(float));
+            std::memcpy(best_L_c.data(), L_c.data(), (size_t)C     * sizeof(float));
+            std::memcpy(best_L_r.data(), L_r.data(), (size_t)R     * sizeof(float));
         }
     }
 
+    // Restore best snapshot and emit multiplicative scales.
     std::memcpy(T, best_T.data(), (size_t)R * C * sizeof(float));
-    std::memcpy(S_c, best_S_c.data(), (size_t)C * sizeof(float));
-    std::memcpy(S_r, best_S_r.data(), (size_t)R * sizeof(float));
+
+    for (int j = 0; j < C; j++) {
+        S_c[j] = std::exp(best_L_c[j]);
+    }
+    for (int i = 0; i < R; i++) {
+        S_r[i] = std::exp(best_L_r[i]);
+    }
 }
