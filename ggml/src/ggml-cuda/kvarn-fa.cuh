@@ -13,3 +13,9 @@ extern "C" void kvarn_kq_scores_cuda(const void * Kblocks, const float * Q,
 extern "C" void kvarn_fa_group_cuda(const void * Kblocks, const float * Q,
         const float * Sr, const float * Sc, const void * V_f16, const float * mask,
         float * O, int D, int n_q, int G, float scale);
+
+// Generalized attention over n_kv keys (multiple groups) with GQA multi-head. Layouts
+// documented in kvarn-fa.cu. This is the compute the graph op will run.
+extern "C" void kvarn_fa_cuda(const void * Kblocks, const float * Q,
+        const float * Sr, const float * Sc, const void * V_f16, const float * mask,
+        float * O, int head_dim, int n_head, int n_head_kv, int n_tok, int n_kv, float scale);

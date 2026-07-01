@@ -130,6 +130,108 @@ static __global__ void kvarn_fa_group_kernel(
     }
 }
 
+// Increment 4: generalized attention over n_kv keys (multiple groups) with GQA
+// multi-head. This is the real op's compute. Logical (contiguous) layouts:
+//   Q  [head_dim, n_head, n_tok]    Q[d + head_dim*(h + n_head*qt)]
+//   K  channel-major blocks: block(kv head hk, dim d, group g) at index
+//        (hk*head_dim + d) + g*C, C = head_dim*n_head_kv; code = qs[t/4], t = T%G.
+//   Sr [head_dim, n_head_kv, ng]    Sr[d + head_dim*(hk + n_head_kv*g)]
+//   Sc [G,        n_head_kv, ng]    Sc[t + G*(hk + n_head_kv*g)]
+//   V  [head_dim, n_head_kv, n_kv]  half, V[d + head_dim*(hk + n_head_kv*T)]
+//   mask [n_kv, n_tok]              mask[T + n_kv*qt]  (0 keep, -inf drop)
+//   O  [head_dim, n_head, n_tok]    O[d + head_dim*(h + n_head*qt)]
+// GQA: hk = h / (n_head / n_head_kv). One block per (qt, h); 128 threads; scores live
+// in dynamic shared memory (n_kv floats). G is fixed at QG2_KVARN (128).
+static __global__ void kvarn_fa_kernel(
+        const block_q2_kvarn_k * __restrict__ K, const float * __restrict__ Q,
+        const float * __restrict__ Sr, const float * __restrict__ Sc,
+        const half * __restrict__ V, const float * __restrict__ mask,
+        float * __restrict__ O, int head_dim, int n_head, int n_head_kv,
+        int n_tok, int n_kv, float scale) {
+    extern __shared__ float sh[];        // [n_kv] scores/probabilities
+    const int qt = blockIdx.x;
+    const int h  = blockIdx.y;
+    const int hk = h / (n_head / n_head_kv);
+    const int tx = threadIdx.x;
+    const int G  = QG2_KVARN;
+    const int n_groups = n_kv / G;
+    const int C  = head_dim * n_head_kv;
+
+    const float * Qq = Q + (size_t) head_dim * (h + (size_t) n_head * qt);
+
+    // Scores for all keys.
+    for (int T = tx; T < n_kv; T += blockDim.x) {
+        const int g = T / G, t = T % G;
+        const int byte_idx = t >> 2, shift = (t & 3) * 2;
+        const block_q2_kvarn_k * Kg = K + (size_t) g * C + (size_t) hk * head_dim;
+        const float * Srg = Sr + (size_t) head_dim * (hk + (size_t) n_head_kv * g);
+        float acc = 0.0f;
+        for (int d = 0; d < head_dim; d++) {
+            const block_q2_kvarn_k & b = Kg[d];
+            const int code = (b.qs[byte_idx] >> shift) & 0x03;
+            acc += Qq[d] * ((float)code + __half2float(b.z)) * (__half2float(b.s) * Srg[d]);
+        }
+        const float sc_t = Sc[t + (size_t) G * (hk + (size_t) n_head_kv * g)];
+        sh[T] = scale * sc_t * acc + mask[(size_t) T + (size_t) n_kv * qt];
+    }
+    __syncthreads();
+
+    // Max over n_kv (thread 0; n_kv small at prefill). Then exp + sum.
+    __shared__ float s_m, s_denom;
+    if (tx == 0) {
+        float m = -INFINITY;
+        for (int T = 0; T < n_kv; T++) m = fmaxf(m, sh[T]);
+        float denom = 0.0f;
+        for (int T = 0; T < n_kv; T++) { float e = expf(sh[T] - m); sh[T] = e; denom += e; }
+        s_m = m; s_denom = denom;
+    }
+    __syncthreads();
+    const float inv = s_denom > 0.0f ? 1.0f / s_denom : 0.0f;
+
+    // O[d] = sum_T p[T] * V(d,hk,T). One thread per output channel.
+    if (tx < head_dim) {
+        float o = 0.0f;
+        for (int T = 0; T < n_kv; T++) {
+            o += sh[T] * __half2float(V[(size_t) head_dim * (hk + (size_t) n_head_kv * T) + tx]);
+        }
+        O[(size_t) head_dim * (h + (size_t) n_head * qt) + tx] = o * inv;
+    }
+}
+
+extern "C" void kvarn_fa_cuda(const void * Kblocks, const float * Q,
+        const float * Sr, const float * Sc, const void * V_f16, const float * mask,
+        float * O, int head_dim, int n_head, int n_head_kv, int n_tok, int n_kv, float scale) {
+    const int G = QG2_KVARN;
+    const int n_groups = n_kv / G;
+    const int C = head_dim * n_head_kv;
+    const size_t kbytes = (size_t) C * n_groups * sizeof(block_q2_kvarn_k);
+    block_q2_kvarn_k * dK = nullptr;
+    float *dQ=nullptr,*dSr=nullptr,*dSc=nullptr,*dmask=nullptr,*dO=nullptr; half * dV=nullptr;
+    CUDA_CHECK(cudaMalloc(&dK, kbytes));
+    CUDA_CHECK(cudaMalloc(&dQ, (size_t) head_dim*n_head*n_tok*sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dSr, (size_t) head_dim*n_head_kv*n_groups*sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dSc, (size_t) G*n_head_kv*n_groups*sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dV, (size_t) head_dim*n_head_kv*n_kv*sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&dmask, (size_t) n_kv*n_tok*sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dO, (size_t) head_dim*n_head*n_tok*sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(dK, Kblocks, kbytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dQ, Q, (size_t) head_dim*n_head*n_tok*sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dSr, Sr, (size_t) head_dim*n_head_kv*n_groups*sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dSc, Sc, (size_t) G*n_head_kv*n_groups*sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dV, V_f16, (size_t) head_dim*n_head_kv*n_kv*sizeof(half), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dmask, mask, (size_t) n_kv*n_tok*sizeof(float), cudaMemcpyHostToDevice));
+
+    dim3 grid(n_tok, n_head);
+    kvarn_fa_kernel<<<grid, 128, n_kv*sizeof(float)>>>(dK, dQ, dSr, dSc, dV, dmask, dO,
+            head_dim, n_head, n_head_kv, n_tok, n_kv, scale);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(O, dO, (size_t) head_dim*n_head*n_tok*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(dK)); CUDA_CHECK(cudaFree(dQ)); CUDA_CHECK(cudaFree(dSr));
+    CUDA_CHECK(cudaFree(dSc)); CUDA_CHECK(cudaFree(dV)); CUDA_CHECK(cudaFree(dmask)); CUDA_CHECK(cudaFree(dO));
+}
+
 extern "C" void kvarn_fa_group_cuda(const void * Kblocks, const float * Q,
         const float * Sr, const float * Sc, const void * V_f16, const float * mask,
         float * O, int D, int n_q, int G, float scale) {

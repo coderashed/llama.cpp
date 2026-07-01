@@ -18,6 +18,9 @@ extern "C" void kvarn_kq_scores_cuda(const void * Kblocks, const float * Q,
 extern "C" void kvarn_fa_group_cuda(const void * Kblocks, const float * Q,
         const float * Sr, const float * Sc, const void * V_f16, const float * mask,
         float * O, int D, int n_q, int G, float scale);
+extern "C" void kvarn_fa_cuda(const void * Kblocks, const float * Q,
+        const float * Sr, const float * Sc, const void * V_f16, const float * mask,
+        float * O, int head_dim, int n_head, int n_head_kv, int n_tok, int n_kv, float scale);
 
 static inline float h2f(ggml_half h) { return ggml_fp16_to_fp32(h); }
 static inline ggml_half f2h(float f)  { return ggml_fp32_to_fp16(f); }
@@ -108,6 +111,73 @@ int main(void) {
     }
     printf("  attention O: max rel dev over %d x %d = %.7f\n", n_q, D, o_max_rel);
     assert(o_max_rel < 5e-3f);
+
+    // Increment 4: generalized attention -- GQA multi-head + multiple groups.
+    {
+        const int head_dim = 128, n_head = 4, n_head_kv = 2;
+        const int n_tok = 3, n_kv = 256, ng = n_kv / G, C = head_dim * n_head_kv;
+        const float gscale = 1.0f / sqrtf((float) head_dim);
+        std::vector<block_q2_kvarn_k> gK((size_t) C * ng);
+        for (auto & b : gK) {
+            for (int j = 0; j < QG2_KVARN/4; j++) b.qs[j] = (uint8_t)(rand() & 0xFF);
+            b.s = f2h(0.02f + (rand() % 200) * 0.005f);
+            b.z = f2h(((rand() % 201) - 100) * 0.01f);
+        }
+        std::vector<float> gSr((size_t) head_dim*n_head_kv*ng), gSc((size_t) G*n_head_kv*ng);
+        for (auto & x : gSr) x = h2f(f2h(0.3f + (rand() % 300) * 0.01f));
+        for (auto & x : gSc) x = h2f(f2h(0.3f + (rand() % 300) * 0.01f));
+        std::vector<float> gQ((size_t) head_dim*n_head*n_tok);
+        for (auto & x : gQ) x = ((rand() % 201) - 100) * 0.01f;
+        std::vector<uint16_t> gVh((size_t) head_dim*n_head_kv*n_kv);
+        std::vector<float>    gVf((size_t) head_dim*n_head_kv*n_kv);
+        for (size_t i = 0; i < gVh.size(); i++) {
+            float v = ((rand() % 201) - 100) * 0.01f;
+            gVf[i] = ggml_fp16_to_fp32(ggml_fp32_to_fp16(v));
+            gVh[i] = ggml_fp32_to_fp16(v);
+        }
+        std::vector<float> gmask((size_t) n_kv*n_tok);
+        for (int qt = 0; qt < n_tok; qt++) for (int T = 0; T < n_kv; T++)
+            gmask[(size_t) T + n_kv*qt] = (T <= n_kv - n_tok + qt) ? 0.0f : -INFINITY;
+
+        std::vector<float> gO((size_t) head_dim*n_head*n_tok);
+        kvarn_fa_cuda(gK.data(), gQ.data(), gSr.data(), gSc.data(), gVh.data(), gmask.data(),
+                gO.data(), head_dim, n_head, n_head_kv, n_tok, n_kv, gscale);
+
+        float g_max_rel = 0.0f;
+        for (int qt = 0; qt < n_tok; qt++) for (int h = 0; h < n_head; h++) {
+            const int hk = h / (n_head / n_head_kv);
+            const float * Qq = gQ.data() + (size_t) head_dim * (h + n_head * qt);
+            std::vector<double> sco(n_kv); double mx = -1e300;
+            for (int T = 0; T < n_kv; T++) {
+                const int g = T / G, t = T % G;
+                const block_q2_kvarn_k * Kg = gK.data() + (size_t) g * C + (size_t) hk * head_dim;
+                double acc = 0.0;
+                for (int d = 0; d < head_dim; d++) {
+                    const double s = (double) h2f(Kg[d].s), z = (double) h2f(Kg[d].z);
+                    const int code = (Kg[d].qs[t >> 2] >> ((t & 3) * 2)) & 0x03;
+                    const double Sr_ = gSr[(size_t) head_dim*(hk + n_head_kv*g) + d];
+                    acc += (double)Qq[d] * ((double)code + z) * s * Sr_;
+                }
+                const double Sc_ = gSc[(size_t) G*(hk + n_head_kv*g) + t];
+                sco[T] = (double)gscale * Sc_ * acc + (double) gmask[(size_t) T + n_kv*qt];
+                if (sco[T] > mx) mx = sco[T];
+            }
+            double sum = 0.0;
+            for (int T = 0; T < n_kv; T++) { sco[T] = exp(sco[T] - mx); sum += sco[T]; }
+            for (int d = 0; d < head_dim; d++) {
+                double o = 0.0;
+                for (int T = 0; T < n_kv; T++)
+                    o += sco[T] * (double) gVf[(size_t) head_dim*(hk + n_head_kv*T) + d];
+                o /= sum;
+                float got = gO[(size_t) head_dim*(h + n_head*qt) + d];
+                float denom = fabs(o) > 1e-4 ? (float) fabs(o) : 1e-4f;
+                g_max_rel = fmaxf(g_max_rel, fabsf(got - (float) o) / denom);
+            }
+        }
+        printf("  generalized (GQA %dx%d, %d groups): max rel dev = %.7f\n",
+                n_head, n_head_kv, ng, g_max_rel);
+        assert(g_max_rel < 5e-3f);
+    }
 
     printf("\nPASSED\n");
     return 0;
