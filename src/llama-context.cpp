@@ -231,6 +231,17 @@ llama_context::llama_context(
         const char * LLAMA_GRAPH_REUSE_DISABLE = getenv("LLAMA_GRAPH_REUSE_DISABLE");
         graph_reuse_disable = LLAMA_GRAPH_REUSE_DISABLE ? (atoi(LLAMA_GRAPH_REUSE_DISABLE) != 0) : graph_reuse_disable;
 
+        // The KVarN per-channel read path (cpy_k_regions / get_k) bakes head()-derived
+        // view offsets into the graph at build time, unlike the per-token path which
+        // steers cpy_k through the data-driven k_idxs input. A reused graph therefore
+        // freezes those offsets and every decode step clobbers the same recent slot,
+        // corrupting generation. Until the offsets are made data-driven, force a fresh
+        // graph each forward when this prototype path is active.
+        if (getenv("LLAMA_KVARN_PERCHANNEL_READ") && !graph_reuse_disable) {
+            graph_reuse_disable = true;
+            LLAMA_LOG_WARN("%s: graph reuse disabled (KVarN per-channel read path)\n", __func__);
+        }
+
         if (graph_reuse_disable) {
             LLAMA_LOG_WARN("%s: graph reuse disabled\n", __func__);
         }
