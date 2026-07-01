@@ -23,9 +23,15 @@
 #include "ggml-cpu.h"
 #include "ggml-quants.h"
 
-#if defined(GGML_CUDA) || defined(GGML_HIP)
+#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP)
 #include "ggml-cuda.h"
 #include "ggml-backend.h"
+
+// Host wrapper exported by ggml/src/ggml-cuda/kvarn-k-quant.cu: runs the
+// per-channel tile quantize kernel on the GPU and copies blocks back. Declared
+// here so Test 3 can assert bit-identity against the CPU reference.
+extern "C" void quantize_k_q2_kvarn_perchannel_tile_cuda(
+        const float * tile, block_q2_kvarn_k * out, int n_ch, int n_tok);
 #endif
 
 #undef NDEBUG
@@ -175,7 +181,7 @@ static void test_round_trip_outlier(void) {
 // Then replace the GGML_ABORT below with the real comparison.
 // ---------------------------------------------------------------------------
 static void test_cpu_cuda_identical(void) {
-#if defined(GGML_CUDA) || defined(GGML_HIP)
+#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP)
     ggml_backend_t cuda_backend = ggml_backend_cuda_init(0);
     if (!cuda_backend) {
         printf("SKIP (no CUDA/HIP device found at runtime)\n");
@@ -198,18 +204,17 @@ static void test_cpu_cuda_identical(void) {
     std::vector<block_q2_kvarn_k> cpu_blocks(N_CH);
     quantize_row_q2_kvarn_k_ref(tile.data(), cpu_blocks.data(), N_CH, N_TOK);
 
-    // CUDA path: GREEN must implement quantize_k_q2_kvarn_perchannel_tile in
-    // ggml/src/ggml-cuda/cpy-utils.cuh and expose a host wrapper here.
-    // For now this documents the RED contract.
-    //
-    // GREEN TODO: call the wrapper, copy results to cuda_blocks, then assert:
-    //   for (int ch = 0; ch < N_CH; ch++) {
-    //       assert(cpu_blocks[ch].s == cuda_blocks[ch].s);
-    //       assert(cpu_blocks[ch].z == cuda_blocks[ch].z);
-    //       assert(memcmp(cpu_blocks[ch].qs, cuda_blocks[ch].qs,
-    //                     sizeof(cpu_blocks[ch].qs)) == 0);
-    //   }
-    GGML_ABORT("CUDA per-channel tile quantizer not yet implemented -- Phase A GREEN");
+    // CUDA/HIP path: run the device tile quantizer on the same float tile.
+    std::vector<block_q2_kvarn_k> cuda_blocks(N_CH);
+    quantize_k_q2_kvarn_perchannel_tile_cuda(tile.data(), cuda_blocks.data(), N_CH, N_TOK);
+
+    // Mirror invariant: device output must be bit-identical to the CPU reference.
+    for (int ch = 0; ch < N_CH; ch++) {
+        assert(cpu_blocks[ch].s == cuda_blocks[ch].s);
+        assert(cpu_blocks[ch].z == cuda_blocks[ch].z);
+        assert(memcmp(cpu_blocks[ch].qs, cuda_blocks[ch].qs,
+                      sizeof(cpu_blocks[ch].qs)) == 0);
+    }
 #else
     printf("SKIP (not a CUDA/HIP build)\n");
 #endif
@@ -294,7 +299,8 @@ int main(void) {
     printf("PASSED\n");
     passed++;
 
-    // Test 3: CPU vs CUDA bit-identity -- SKIPS (no CUDA) or FAILS (CUDA present, stub aborts).
+    // Test 3: CPU vs CUDA bit-identity -- SKIPS on a CPU-only build or when no
+    // device is present at runtime; otherwise asserts the mirror invariant.
     printf("  Test 3 (cpu_cuda_identical): ");
     fflush(stdout);
     test_cpu_cuda_identical();
