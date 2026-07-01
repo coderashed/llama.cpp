@@ -474,6 +474,14 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_KVARN_FA:
             return false; // CUDA/HIP only (reads channel-major block_q2_kvarn_k)
+        case GGML_OP_KVARN_VARN:
+            // Cede to the GPU ONLY the tile shapes its kernel accepts (head_dim,n_tok <= 256;
+            // mirror ggml-cuda supports_op / VARN_MAXDIM). Returning false there forces GPU
+            // placement and avoids the single-threaded CPU ops/forward that made the path
+            // 81s vs 3s. For larger tiles the GPU kernel has no instance, so the CPU forward
+            // (the real reference, also used by test-q2-kvarn-varn-op) must stay available --
+            // otherwise no backend claims the op and ggml_backend_sched_split_graph aborts.
+            return !(op->src[0]->ne[0] <= 256 && op->src[0]->ne[1] <= 256);
         default:
             return true;
     }

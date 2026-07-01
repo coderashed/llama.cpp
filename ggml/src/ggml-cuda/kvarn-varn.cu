@@ -1,20 +1,20 @@
 // GPU VarN kernel (KVARN_FAITHFUL/04, GPU-ization step). Faithful port of the CPU
-// kvarn_variance_normalize (Algorithm 1, SINQ log-domain std-scaling) to a device
-// kernel so VarN no longer forces a CPU custom-op round-trip. One block per tile,
-// single thread per block (parallel across tiles, sequential within) -- simple and
-// bit-close to the CPU reference. The 128x128 working tile lives in global scratch;
-// only the log-scale vectors are per-thread local. best_T is not stored: by the
+// kvarn_variance_normalize (Algorithm 1, SINQ log-domain std-scaling). One block per
+// tile, VARN_NTHREADS threads per block cooperating on the [R x C] tile (row-major).
+// Within a VarN step the columns are mutually independent (each touches only its own
+// column) and likewise the rows, so thread j owns column j / thread i owns row i and
+// keeps the same sequential double-precision mean/variance the CPU uses -- bit-close by
+// construction. Only the tile_mean (used solely in the degenerate v<=eps branch) and
+// the imbalance min/max are cross-thread reductions. The 128x128 working tile lives in
+// global scratch; log-scale vectors live in shared memory. best_T is not stored: by the
 // invariant orig = T*exp(L_c)*exp(L_r), the best tile is recomputed as
 // in / exp(best_L_c) / exp(best_L_r).
-//
-// NOTE: not yet wired into the graph (ggml custom ops are CPU-only; graph use needs
-// a new GGML op or a backend hook). This is the reusable kernel + host wrapper +
-// bit-close test, mirroring the Phase A per-channel quantizer pattern.
 
 #include "common.cuh"
 #include "kvarn-varn.cuh"
 
-#define VARN_MAXDIM 128
+#define VARN_MAXDIM  256
+#define VARN_NTHREADS 128
 #define VARN_VAR_EPS 1e-12
 #define VARN_K       12
 #define VARN_CMIN    (-5.0f)
@@ -24,95 +24,138 @@ static __device__ __forceinline__ float varn_clampf(float x, float lo, float hi)
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-// One block per tile; thread 0 runs the whole VarN for its [R x C] tile (row-major).
+// Block-wide tile mean over R*C floats (double accumulation). All threads participate.
+static __device__ __forceinline__ double varn_block_tile_mean(
+        const float * __restrict__ work, int RC, int t, int nth, double * red) {
+    double part = 0.0;
+    for (int k = t; k < RC; k += nth) part += (double) work[k];
+    red[t] = part;
+    __syncthreads();
+    for (int s = nth >> 1; s > 0; s >>= 1) { if (t < s) red[t] += red[t + s]; __syncthreads(); }
+    double m = red[0] / (double) RC;
+    __syncthreads();
+    return m;
+}
+
+// One block per tile; VARN_NTHREADS threads run VarN for the [R x C] tile (row-major).
 static __global__ void kvarn_varn_tile_kernel(
         const float * __restrict__ Tin, float * __restrict__ Tout,
         float * __restrict__ Sr, float * __restrict__ Sc, int R, int C) {
-    if (threadIdx.x != 0) {
-        return;
-    }
     const int tile = blockIdx.x;
-    const float * in   = Tin  + (size_t) tile * R * C;
-    float *       work = Tout + (size_t) tile * R * C;
+    const int t    = threadIdx.x;
+    const int nth  = blockDim.x;
+    const int RC   = R * C;
+    const float * in   = Tin  + (size_t) tile * RC;
+    float *       work = Tout + (size_t) tile * RC;
     float *       sr   = Sr   + (size_t) tile * R;
     float *       sc   = Sc   + (size_t) tile * C;
 
-    float L_c[VARN_MAXDIM], L_r[VARN_MAXDIM], bLc[VARN_MAXDIM], bLr[VARN_MAXDIM];
-    for (int j = 0; j < C; j++) { L_c[j] = 0.0f; bLc[j] = 0.0f; }
-    for (int i = 0; i < R; i++) { L_r[i] = 0.0f; bLr[i] = 0.0f; }
-    for (int k = 0; k < R*C; k++) work[k] = in[k];
+    __shared__ float  L_c[VARN_MAXDIM], L_r[VARN_MAXDIM], bLc[VARN_MAXDIM], bLr[VARN_MAXDIM];
+    __shared__ double red[VARN_NTHREADS];
+    __shared__ float  redf[VARN_NTHREADS];
+    __shared__ double s_best_imb;
+    __shared__ int    s_improved;
 
-    double best_imb = 1e300; // FLT_MAX-equivalent; CPU snapshots only when improved
+    for (int j = t; j < C;  j += nth) { L_c[j] = 0.0f; bLc[j] = 0.0f; }
+    for (int i = t; i < R;  i += nth) { L_r[i] = 0.0f; bLr[i] = 0.0f; }
+    for (int k = t; k < RC; k += nth) work[k] = in[k];
+    if (t == 0) s_best_imb = 1e300; // CPU snapshots only when improved
+    __syncthreads();
 
     for (int iter = 0; iter < VARN_K; iter++) {
-        // --- normalize columns ---
-        double tile_mean = 0.0;
-        for (int k = 0; k < R*C; k++) tile_mean += (double) work[k];
-        tile_mean /= (double)(R*C);
-        for (int j = 0; j < C; j++) {
+        // --- normalize columns (each thread owns a strided set of columns) ---
+        double tile_mean = varn_block_tile_mean(work, RC, t, nth, red);
+        for (int j = t; j < C; j += nth) {
             double mean = 0.0;
             for (int i = 0; i < R; i++) mean += (double) work[i*C + j];
             mean /= (double) R;
             double m2 = 0.0;
             for (int i = 0; i < R; i++) { double d = (double) work[i*C + j] - mean; m2 += d*d; }
             double v = m2 / (double) R;
-            if (v <= VARN_VAR_EPS) { double dev = mean - tile_mean; v = dev*dev; if (v <= VARN_VAR_EPS) continue; }
-            double delta = 0.5 * log(v);
-            float  Lnew  = varn_clampf((float)((double) L_c[j] + delta), VARN_CMIN, VARN_CMAX);
-            float  f     = expf(Lnew - L_c[j]);
-            for (int i = 0; i < R; i++) work[i*C + j] /= f;
-            L_c[j] = Lnew;
+            bool skip = false;
+            if (v <= VARN_VAR_EPS) { double dev = mean - tile_mean; v = dev*dev; if (v <= VARN_VAR_EPS) skip = true; }
+            if (!skip) {
+                double delta = 0.5 * log(v);
+                float  Lnew  = varn_clampf((float)((double) L_c[j] + delta), VARN_CMIN, VARN_CMAX);
+                float  f     = expf(Lnew - L_c[j]);
+                for (int i = 0; i < R; i++) work[i*C + j] /= f;
+                L_c[j] = Lnew;
+            }
         }
-        // --- normalize rows ---
-        tile_mean = 0.0;
-        for (int k = 0; k < R*C; k++) tile_mean += (double) work[k];
-        tile_mean /= (double)(R*C);
-        for (int i = 0; i < R; i++) {
+        __syncthreads();
+
+        // --- normalize rows (each thread owns a strided set of rows) ---
+        tile_mean = varn_block_tile_mean(work, RC, t, nth, red);
+        for (int i = t; i < R; i += nth) {
             double mean = 0.0;
             for (int j = 0; j < C; j++) mean += (double) work[i*C + j];
             mean /= (double) C;
             double m2 = 0.0;
             for (int j = 0; j < C; j++) { double d = (double) work[i*C + j] - mean; m2 += d*d; }
             double v = m2 / (double) C;
-            if (v <= VARN_VAR_EPS) { double dev = mean - tile_mean; v = dev*dev; if (v <= VARN_VAR_EPS) continue; }
-            double delta = 0.5 * log(v);
-            float  Lnew  = varn_clampf((float)((double) L_r[i] + delta), VARN_CMIN, VARN_CMAX);
-            float  f     = expf(Lnew - L_r[i]);
-            for (int j = 0; j < C; j++) work[i*C + j] /= f;
-            L_r[i] = Lnew;
+            bool skip = false;
+            if (v <= VARN_VAR_EPS) { double dev = mean - tile_mean; v = dev*dev; if (v <= VARN_VAR_EPS) skip = true; }
+            if (!skip) {
+                double delta = 0.5 * log(v);
+                float  Lnew  = varn_clampf((float)((double) L_r[i] + delta), VARN_CMIN, VARN_CMAX);
+                float  f     = expf(Lnew - L_r[i]);
+                for (int j = 0; j < C; j++) work[i*C + j] /= f;
+                L_r[i] = Lnew;
+            }
         }
-        // --- imbalance metric (product form, matches CPU) ---
-        float minc = 3.4e38f, maxc = -3.4e38f, minr = 3.4e38f, maxr = -3.4e38f;
-        for (int j = 0; j < C; j++) {
+        __syncthreads();
+
+        // --- imbalance metric (product form, matches CPU): min/max of col & row var ---
+        float my_min = 3.4e38f, my_max = -3.4e38f;
+        for (int j = t; j < C; j += nth) {
             double mean = 0.0, m2 = 0.0;
             for (int i = 0; i < R; i++) mean += work[i*C + j];
             mean /= (double) R;
             for (int i = 0; i < R; i++) { double d = work[i*C + j] - mean; m2 += d*d; }
             float vv = (float)(m2 / (double) R);
-            if (vv < minc) minc = vv; if (vv > maxc) maxc = vv;
+            my_min = fminf(my_min, vv); my_max = fmaxf(my_max, vv);
         }
-        for (int i = 0; i < R; i++) {
+        redf[t] = my_min; __syncthreads();
+        for (int s = nth >> 1; s > 0; s >>= 1) { if (t < s) redf[t] = fminf(redf[t], redf[t+s]); __syncthreads(); }
+        float minc = redf[0]; __syncthreads();
+        redf[t] = my_max; __syncthreads();
+        for (int s = nth >> 1; s > 0; s >>= 1) { if (t < s) redf[t] = fmaxf(redf[t], redf[t+s]); __syncthreads(); }
+        float maxc = redf[0]; __syncthreads();
+
+        my_min = 3.4e38f; my_max = -3.4e38f;
+        for (int i = t; i < R; i += nth) {
             double mean = 0.0, m2 = 0.0;
             for (int j = 0; j < C; j++) mean += work[i*C + j];
             mean /= (double) C;
             for (int j = 0; j < C; j++) { double d = work[i*C + j] - mean; m2 += d*d; }
             float vv = (float)(m2 / (double) C);
-            if (vv < minr) minr = vv; if (vv > maxr) maxr = vv;
+            my_min = fminf(my_min, vv); my_max = fmaxf(my_max, vv);
         }
-        const float eps = 1e-8f;
-        float imb = (maxc / fmaxf(minc, eps)) * (maxr / fmaxf(minr, eps));
-        if ((double) imb < best_imb) {
-            best_imb = imb;
-            for (int j = 0; j < C; j++) bLc[j] = L_c[j];
-            for (int i = 0; i < R; i++) bLr[i] = L_r[i];
+        redf[t] = my_min; __syncthreads();
+        for (int s = nth >> 1; s > 0; s >>= 1) { if (t < s) redf[t] = fminf(redf[t], redf[t+s]); __syncthreads(); }
+        float minr = redf[0]; __syncthreads();
+        redf[t] = my_max; __syncthreads();
+        for (int s = nth >> 1; s > 0; s >>= 1) { if (t < s) redf[t] = fmaxf(redf[t], redf[t+s]); __syncthreads(); }
+        float maxr = redf[0]; __syncthreads();
+
+        if (t == 0) {
+            const float eps = 1e-8f;
+            float imb = (maxc / fmaxf(minc, eps)) * (maxr / fmaxf(minr, eps));
+            s_improved = ((double) imb < s_best_imb) ? 1 : 0;
+            if (s_improved) s_best_imb = imb;
         }
+        __syncthreads();
+        if (s_improved) {
+            for (int j = t; j < C; j += nth) bLc[j] = L_c[j];
+            for (int i = t; i < R; i += nth) bLr[i] = L_r[i];
+        }
+        __syncthreads();
     }
 
-    for (int j = 0; j < C; j++) sc[j] = expf(bLc[j]);
-    for (int i = 0; i < R; i++) sr[i] = expf(bLr[i]);
-    for (int i = 0; i < R; i++)
-        for (int j = 0; j < C; j++)
-            work[i*C + j] = in[i*C + j] / sr[i] / sc[j];
+    for (int j = t; j < C; j += nth) sc[j] = expf(bLc[j]);
+    for (int i = t; i < R; i += nth) sr[i] = expf(bLr[i]);
+    __syncthreads();
+    for (int k = t; k < RC; k += nth) { int i = k / C, j = k % C; work[k] = in[k] / sr[i] / sc[j]; }
 }
 
 // Host wrapper: run VarN on n_tiles [R x C] tiles. Tnorm/Sr/Sc are host buffers.
@@ -126,7 +169,7 @@ extern "C" void kvarn_varn_tile_cuda(const float * tiles, float * Tnorm,
     CUDA_CHECK(cudaMalloc(&dSr, (size_t) n_tiles * R * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&dSc, (size_t) n_tiles * C * sizeof(float)));
     CUDA_CHECK(cudaMemcpy(dTin, tiles, nt * sizeof(float), cudaMemcpyHostToDevice));
-    kvarn_varn_tile_kernel<<<n_tiles, 1>>>(dTin, dTout, dSr, dSc, R, C);
+    kvarn_varn_tile_kernel<<<n_tiles, VARN_NTHREADS>>>(dTin, dTout, dSr, dSc, R, C);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemcpy(Tnorm, dTout, nt * sizeof(float), cudaMemcpyDeviceToHost));
@@ -160,7 +203,7 @@ void ggml_cuda_op_kvarn_varn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     float *       Sr    = dst_d + nt;
     float *       Sc    = dst_d + nt + n_ch;
 
-    kvarn_varn_tile_kernel<<<n_head, 1, 0, ctx.stream()>>>(
+    kvarn_varn_tile_kernel<<<n_head, VARN_NTHREADS, 0, ctx.stream()>>>(
             src_d, dst_d, Sr, Sc, head_dim, n_tok);
     CUDA_CHECK(cudaGetLastError());
 }
