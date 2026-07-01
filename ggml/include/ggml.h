@@ -592,6 +592,8 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_KVARN_VARN,
+
         GGML_OP_COUNT,
     };
 
@@ -2722,6 +2724,15 @@ extern "C" {
             ggml_custom_op_t      fun,
             int                   n_tasks,
             void                * userdata);
+
+    // KVARN VarN (item 04): SINQ log-domain std-dev variance normalization.
+    // Input a is F32 [n_tok, head_dim, n_head] (contiguous); VarN runs per head over
+    // the [head_dim x n_tok] tile. Output is a flat F32 tensor packed as
+    //   [T_norm(n_ch*n_tok) ++ S_r(n_ch) ++ S_c(n_head*n_tok)],  n_ch = head_dim*n_head
+    // matching the CPU custom-op layout. Runs on CPU and CUDA/HIP backends.
+    GGML_API struct ggml_tensor * ggml_kvarn_varn(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
 
     // loss function
 
