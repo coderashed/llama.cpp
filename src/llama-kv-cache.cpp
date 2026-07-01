@@ -1405,12 +1405,11 @@ ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q
         return nullptr;
     }
 
-    // The fused KVARN_FA kernel is capped at head_dim <= 128 (kvarn-fa.cu + supports_op).
-    // For larger head_dim (e.g. 256 on Qwen3-35B / gemma) it has no GPU instance AND no CPU
-    // fallback, so emitting the op would leave it with no backend -> ggml_backend_sched
-    // aborts. Fall back to the reconstruct path (which handles any head_dim). q is
-    // [head_dim, n_head, n_tok].
-    if (q->ne[0] > 128) {
+    // The fused KVARN_FA kernel handles head_dim <= 256 (kvarn-fa.cu strides output channels;
+    // supports_op mirrors this). Beyond that it has no GPU instance and no CPU fallback, so
+    // emitting the op would leave it with no backend -> ggml_backend_sched aborts; fall back
+    // to the reconstruct path (any head_dim) instead. q is [head_dim, n_head, n_tok].
+    if (q->ne[0] > 256) {
         return nullptr;
     }
 

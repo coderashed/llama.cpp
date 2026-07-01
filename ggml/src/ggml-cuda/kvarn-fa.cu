@@ -175,25 +175,31 @@ static __global__ void kvarn_fa_kernel(
     }
     __syncthreads();
 
-    // Max over n_kv (thread 0; n_kv small at prefill). Then exp + sum.
-    __shared__ float s_m, s_denom;
-    if (tx == 0) {
-        float m = -INFINITY;
-        for (int T = 0; T < n_kv; T++) m = fmaxf(m, sh[T]);
-        float denom = 0.0f;
-        for (int T = 0; T < n_kv; T++) { float e = expf(sh[T] - m); sh[T] = e; denom += e; }
-        s_m = m; s_denom = denom;
-    }
+    // Parallel stable softmax over n_kv: block-reduce max, then exp + block-reduce sum.
+    // blockDim.x is a power of two (128); threads past n_kv contribute the identity.
+    __shared__ float red[128];
+    float pm = -INFINITY;
+    for (int T = tx; T < n_kv; T += blockDim.x) pm = fmaxf(pm, sh[T]);
+    red[tx] = pm; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tx < s) red[tx] = fmaxf(red[tx], red[tx+s]); __syncthreads(); }
+    const float m = red[0];
     __syncthreads();
-    const float inv = s_denom > 0.0f ? 1.0f / s_denom : 0.0f;
 
-    // O[d] = sum_T p[T] * V(d,hk,T). One thread per output channel.
-    if (tx < head_dim) {
+    float ps = 0.0f;
+    for (int T = tx; T < n_kv; T += blockDim.x) { float e = expf(sh[T] - m); sh[T] = e; ps += e; }
+    red[tx] = ps; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tx < s) red[tx] += red[tx+s]; __syncthreads(); }
+    const float denom = red[0];
+    __syncthreads();
+    const float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
+
+    // O[d] = sum_T p[T] * V(d,hk,T). Stride channels so head_dim > blockDim (e.g. 256) is covered.
+    for (int d = tx; d < head_dim; d += blockDim.x) {
         float o = 0.0f;
         for (int T = 0; T < n_kv; T++) {
-            o += sh[T] * __half2float(V[(size_t) head_dim * (hk + (size_t) n_head_kv * T) + tx]);
+            o += sh[T] * __half2float(V[(size_t) head_dim * (hk + (size_t) n_head_kv * T) + d]);
         }
-        O[(size_t) head_dim * (h + (size_t) n_head * qt) + tx] = o * inv;
+        O[(size_t) head_dim * (h + (size_t) n_head * qt) + d] = o * inv;
     }
 }
 
@@ -254,7 +260,7 @@ void ggml_cuda_op_kvarn_fa(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_head_kv = (int) sr->ne[1];
     const int n_kv      = (int) v->ne[2];
     const int mask_stride = (int) (mask->nb[1] / sizeof(float));
-    GGML_ASSERT(head_dim <= 128 && (n_kv % QG2_KVARN) == 0 && (n_head % n_head_kv) == 0);
+    GGML_ASSERT(head_dim <= 256 && (n_kv % QG2_KVARN) == 0 && (n_head % n_head_kv) == 0);
 
     float scale;
     memcpy(&scale, dst->op_params, sizeof(float));
