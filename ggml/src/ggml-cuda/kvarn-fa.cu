@@ -304,3 +304,63 @@ extern "C" void kvarn_fa_group_cuda(const void * Kblocks, const float * Q,
     CUDA_CHECK(cudaFree(dSc)); CUDA_CHECK(cudaFree(dV)); CUDA_CHECK(cudaFree(dmask));
     CUDA_CHECK(cudaFree(dO));
 }
+
+// ============================================================================
+// Tiled fused FA v2 (design: .ai/design/kvarn_tiled_fused_fa_design.md).
+// Increment 1: coalesced channel-major K tile load + dequant.
+// ============================================================================
+
+// Load+dequant a [head_dim x T_tile] K tile for one (head hk, group g) into `kf`,
+// token-major: kf[d*T_tile + tt] = dequant of channel d, token t0+tt, VarN scales
+// folded in as (code + z_d) * s_d * Sr_d * Sc_t. Kg[d] is channel d's block, so
+// consecutive threads read consecutive blocks -> COALESCED; each thread reads its
+// block once and extracts its T_tile token codes. This is the load primitive the
+// tiled kernel is built on.
+static __device__ __forceinline__ void kvarn_load_ktile(
+        const block_q2_kvarn_k * __restrict__ Kg,   // [head_dim] blocks for (hk, g)
+        const float * __restrict__ Srg,             // [head_dim] Sr for (hk, g)
+        const float * __restrict__ Scg,             // [G] Sc for (hk, g), per token in group
+        float * __restrict__ kf,                    // out tile [head_dim * T_tile], token-major
+        int head_dim, int t0, int T_tile) {
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        const block_q2_kvarn_k b = Kg[d];
+        const float ssr = __half2float(b.s) * Srg[d];   // s[d] * Sr[d]
+        const float zd  = __half2float(b.z);
+        for (int tt = 0; tt < T_tile; ++tt) {
+            const int t    = t0 + tt;
+            const int code = (b.qs[t >> 2] >> ((t & 3) * 2)) & 0x03;
+            kf[(size_t) d * T_tile + tt] = ((float) code + zd) * ssr * Scg[t];
+        }
+    }
+}
+
+// Test scaffolding: run kvarn_load_ktile for a single (head, group), write the tile
+// to global memory for host readback. One block.
+static __global__ void kvarn_ktile_load_test_kernel(
+        const block_q2_kvarn_k * __restrict__ Kg, const float * __restrict__ Srg,
+        const float * __restrict__ Scg, float * __restrict__ out,
+        int head_dim, int t0, int T_tile) {
+    kvarn_load_ktile(Kg, Srg, Scg, out, head_dim, t0, T_tile);
+}
+
+// Host wrapper (test only): K = [head_dim] blocks, Sr = [head_dim], Sc = [G];
+// out = [head_dim * T_tile] token-major dequant of tokens [t0, t0+T_tile).
+extern "C" void kvarn_ktile_load_cuda(const void * K, const float * Sr, const float * Sc,
+        float * out, int head_dim, int G, int t0, int T_tile) {
+    const size_t kbytes = (size_t) head_dim * sizeof(block_q2_kvarn_k);
+    block_q2_kvarn_k * dK = nullptr;
+    float * dSr = nullptr, * dSc = nullptr, * dOut = nullptr;
+    CUDA_CHECK(cudaMalloc(&dK,   kbytes));
+    CUDA_CHECK(cudaMalloc(&dSr,  (size_t) head_dim * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dSc,  (size_t) G * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dOut, (size_t) head_dim * T_tile * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(dK,  K,  kbytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dSr, Sr, (size_t) head_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dSc, Sc, (size_t) G * sizeof(float), cudaMemcpyHostToDevice));
+    const int nthreads = head_dim < 256 ? head_dim : 256;
+    kvarn_ktile_load_test_kernel<<<1, nthreads>>>(dK, dSr, dSc, dOut, head_dim, t0, T_tile);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(out, dOut, (size_t) head_dim * T_tile * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(dK)); CUDA_CHECK(cudaFree(dSr)); CUDA_CHECK(cudaFree(dSc)); CUDA_CHECK(cudaFree(dOut));
+}
