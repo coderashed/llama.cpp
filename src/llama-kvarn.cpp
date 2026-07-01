@@ -156,17 +156,26 @@ void kvarn_varn_op(struct ggml_tensor * dst, int ith, int nth, void * userdata) 
         return; // single-task: VarN's best-Imb snapshot is not tile-parallel
     }
     const struct ggml_tensor * src = dst->src[0];
-    const int n_tok = (int) src->ne[0];     // VarN columns C (tokens)
-    const int n_ch  = (int) src->ne[1];     // VarN rows R (channels)
-    const size_t nt = (size_t) n_ch * n_tok;
+    // src is [n_tok, head_dim, n_head]. A 2D input (n_head=1) means whole-tile VarN
+    // over all channels; a 3D input runs VarN per head (paper: 128 head-dim x 128 tok).
+    const int n_tok    = (int) src->ne[0];  // VarN columns C (tokens)
+    const int head_dim = (int) src->ne[1];  // VarN rows R (channels per head)
+    const int n_head   = (int) src->ne[2];
+    const int n_ch     = head_dim * n_head;
+    const size_t nt    = (size_t) n_ch * n_tok;
 
     const float * Tin = (const float *) src->data;
-    float * out = (float *) dst->data;      // packed [T_norm(nt) ++ S_r(n_ch) ++ S_c(n_tok)]
+    float * out = (float *) dst->data;   // packed [T_norm(nt) ++ S_r(n_ch) ++ S_c(n_head*n_tok)]
 
     std::memcpy(out, Tin, nt * sizeof(float));
-    float * S_r = out + nt;
-    float * S_c = S_r + n_ch;
-    kvarn_variance_normalize(out, n_ch, n_tok, 12, -5.0f, 5.0f, S_c, S_r);
+    float * S_r = out + nt;              // [n_ch] per-channel row scales
+    float * S_c = S_r + n_ch;            // [n_head*n_tok] per-head per-token column scales
+    for (int h = 0; h < n_head; h++) {
+        float * Th = out + (size_t) h * head_dim * n_tok; // [head_dim, n_tok] sub-tile, in place
+        kvarn_variance_normalize(Th, head_dim, n_tok, 12, -5.0f, 5.0f,
+                                 S_c + (size_t) h * n_tok,
+                                 S_r + (size_t) h * head_dim);
+    }
 }
 
 void kvarn_variance_normalize(

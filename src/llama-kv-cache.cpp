@@ -1314,9 +1314,15 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
         auto itr = kvarn_sr3d.find(il);
         auto itc = kvarn_sc3d.find(il);
         if (itr != kvarn_sr3d.end() && itc != kvarn_sc3d.end() && itr->second && itc->second) {
-            GGML_ASSERT(itr->second->ne[2] == n_groups); // prefill: all groups written
-            Dp = ggml_mul(ctx, Dp, itr->second);
-            Dp = ggml_mul(ctx, Dp, itc->second);
+            const int64_t head_dim = hparams.n_embd_head_k(il);
+            const int64_t n_head   = hparams.n_head_kv(il);
+            GGML_ASSERT(itr->second->ne[3] == n_groups); // per-group scales, prefill
+            ggml_tensor * Dp4 = ggml_reshape_4d(ctx, Dp, head_dim, n_head, G, n_groups);
+            Dp4 = ggml_mul(ctx, Dp4, itr->second); // x S_r [head_dim,n_head,1,ng] (over tokens)
+            // S_c [G,n_head,1,ng] -> [1,n_head,G,ng] to broadcast over head_dim.
+            ggml_tensor * scb = ggml_cont(ctx, ggml_permute(ctx, itc->second, 2, 1, 0, 3));
+            Dp4 = ggml_mul(ctx, Dp4, scb);
+            Dp = ggml_reshape_3d(ctx, Dp4, C, G, n_groups);
         }
 
         ggml_tensor * K2 = ggml_reshape_2d(ctx, Dp, C, G*n_groups);          // [C, position]
@@ -1457,23 +1463,28 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
 
         ggml_tensor * to_quant = tile_cm;
         if (kvarn_varn) {
-            const int64_t nt = n_embd_gqa*G;
-            ggml_tensor * args[1] = { tile_cm };
-            ggml_tensor * op = ggml_custom_4d(ctx, GGML_TYPE_F32, nt + n_embd_gqa + G, 1, 1, 1,
+            const int64_t nt     = n_embd_gqa*G;
+            const int64_t sc_len = n_head*G;  // per-head per-token
+            // reshape tile_cm [G, n_embd_gqa] -> [G, head_dim, n_head] for per-head VarN
+            ggml_tensor * tile3d = ggml_reshape_3d(ctx, tile_cm, G, n_embd_head, n_head);
+            ggml_tensor * args[1] = { tile3d };
+            ggml_tensor * op = ggml_custom_4d(ctx, GGML_TYPE_F32, nt + n_embd_gqa + sc_len, 1, 1, 1,
                     args, 1, kvarn_varn_op, 1, nullptr);
             to_quant = ggml_view_2d(ctx, op, G, n_embd_gqa, G*sizeof(float), 0); // T_norm [G, C]
-            ggml_tensor * sr = ggml_reshape_3d(ctx,
-                    ggml_view_1d(ctx, op, n_embd_gqa, nt*sizeof(float)), n_embd_gqa, 1, 1);
-            ggml_tensor * sc = ggml_reshape_3d(ctx,
-                    ggml_view_1d(ctx, op, G, (nt + n_embd_gqa)*sizeof(float)), 1, G, 1);
-            sr3d = sr3d ? ggml_concat(ctx, sr3d, sr, 2) : sr;
-            sc3d = sc3d ? ggml_concat(ctx, sc3d, sc, 2) : sc;
+            // S_r [n_embd_gqa] head-major -> [head_dim, n_head, 1, 1]
+            ggml_tensor * sr = ggml_reshape_4d(ctx,
+                    ggml_view_1d(ctx, op, n_embd_gqa, nt*sizeof(float)), n_embd_head, n_head, 1, 1);
+            // S_c [n_head*G] head-major (S_c[h*G+t]) -> [G, n_head, 1, 1]
+            ggml_tensor * sc = ggml_reshape_4d(ctx,
+                    ggml_view_1d(ctx, op, sc_len, (nt + n_embd_gqa)*sizeof(float)), G, n_head, 1, 1);
+            sr3d = sr3d ? ggml_concat(ctx, sr3d, sr, 3) : sr;  // [head_dim, n_head, 1, n_full]
+            sc3d = sc3d ? ggml_concat(ctx, sc3d, sc, 3) : sc;  // [G, n_head, 1, n_full]
         }
         roots.push_back(ggml_cpy(ctx, to_quant, dst)); // F32 -> Q2_KVARN_K (per-channel)
     }
     if (kvarn_varn && sr3d) {
-        kvarn_sr3d[il] = sr3d; // [n_embd_gqa, 1, n_full]
-        kvarn_sc3d[il] = sc3d; // [1, G, n_full]
+        kvarn_sr3d[il] = sr3d; // [head_dim, n_head, 1, n_full]
+        kvarn_sc3d[il] = sc3d; // [G, n_head, 1, n_full]
     } else {
         kvarn_sr3d.erase(il);
         kvarn_sc3d.erase(il);

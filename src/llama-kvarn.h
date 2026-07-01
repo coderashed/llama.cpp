@@ -14,13 +14,13 @@ struct ggml_tensor;
 extern "C" {
 #endif
 
-// ggml custom-op callback (KVARN_FAITHFUL/04): runs VarN on the input group tile
-// and writes a packed output. Input dst->src[0] is F32 [n_tok, n_ch] (contiguous,
-// data = T[ch*n_tok + t], i.e. VarN rows=channels, cols=tokens). Output dst is a
-// flat F32 tensor of size n_ch*n_tok + n_ch + n_tok, laid out as:
-//   [0 .. n_ch*n_tok)              normalized tile T_norm (same layout as input)
-//   [n_ch*n_tok .. +n_ch)          S_r (per-channel row scale)
-//   [n_ch*n_tok+n_ch .. +n_tok)    S_c (per-token column scale)
+// ggml custom-op callback (KVARN_FAITHFUL/04): runs VarN per head on the input group
+// tile and writes a packed output. Input dst->src[0] is F32 [n_tok, head_dim, n_head]
+// (2D input => n_head=1 => whole-tile VarN). n_ch = head_dim*n_head. Output dst is a
+// flat F32 tensor of size n_ch*n_tok + n_ch + n_head*n_tok, laid out as:
+//   [0 .. n_ch*n_tok)                normalized tile T_norm (same layout as input)
+//   [n_ch*n_tok .. +n_ch)            S_r (per-channel row scale, head-major)
+//   [n_ch*n_tok+n_ch .. +n_head*n_tok) S_c (per-head per-token col scale, S_c[h*n_tok+t])
 // Single-task (ith==0 does all work): VarN's best-Imb snapshot is not tile-parallel.
 void kvarn_varn_op(struct ggml_tensor * dst, int ith, int nth, void * userdata);
 
