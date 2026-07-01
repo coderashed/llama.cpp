@@ -75,6 +75,39 @@ static void test_to_float_roundtrip(void) {
     }
 }
 
+// Test 4: from_float_ref quantizes a channel-major row (one channel's 128 tokens
+// per block) identically to quantize_row_q2_kvarn_k_ref. This is the write-path
+// adapter: cpy_k transposes each K group to channel-major, then this quantizes it.
+static void test_from_float_ref(void) {
+    const int n_ch  = 3;
+    const int n_tok = 128;
+
+    // Channel-major tile: row = channel, 128 contiguous tokens.
+    std::vector<float> tile(n_ch * n_tok);
+    for (int ch = 0; ch < n_ch; ch++) {
+        float amp = (ch == 1) ? 8.0f : 1.0f;  // one outlier channel
+        for (int tok = 0; tok < n_tok; tok++) {
+            tile[ch * n_tok + tok] = amp * 0.05f * (float)((tok * 7 + ch) % 23 - 11);
+        }
+    }
+
+    // Direct per-channel reference.
+    std::vector<block_q2_kvarn_k> ref(n_ch);
+    quantize_row_q2_kvarn_k_ref(tile.data(), ref.data(), n_ch, n_tok);
+
+    // Via the registered from_float_ref over the whole channel-major buffer
+    // (k = n_ch * n_tok contiguous floats -> n_ch independent blocks).
+    const ggml_type_traits * tt = ggml_get_type_traits(GGML_TYPE_Q2_KVARN_K);
+    std::vector<block_q2_kvarn_k> via_trait(n_ch);
+    tt->from_float_ref(tile.data(), via_trait.data(), (int64_t)n_ch * n_tok);
+
+    for (int ch = 0; ch < n_ch; ch++) {
+        assert(ref[ch].s == via_trait[ch].s);
+        assert(ref[ch].z == via_trait[ch].z);
+        assert(memcmp(ref[ch].qs, via_trait[ch].qs, sizeof(ref[ch].qs)) == 0);
+    }
+}
+
 int main(void) {
     ggml_cpu_init();
     printf("test-q2-kvarn-k-type:\n");
@@ -95,6 +128,12 @@ int main(void) {
     printf("  Test 3 (to_float_roundtrip): ");
     fflush(stdout);
     test_to_float_roundtrip();
+    printf("PASSED\n");
+    passed++;
+
+    printf("  Test 4 (from_float_ref): ");
+    fflush(stdout);
+    test_from_float_ref();
     printf("PASSED\n");
     passed++;
 
