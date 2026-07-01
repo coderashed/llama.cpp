@@ -76,6 +76,37 @@ static std::vector<block_q2_kvarn_k> run_cpy(ggml_backend_t backend, const std::
     return out;
 }
 
+// Run cast(Q2_KVARN_K blocks -> F32) on `backend`, return the dequantized floats
+// in channel-major [n_tok, n_ch] layout (same as the input tile).
+static std::vector<float> run_cast_back(ggml_backend_t backend, const std::vector<block_q2_kvarn_k> & blocks) {
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead() * 4 + ggml_graph_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    struct ggml_context * ctx = ggml_init(params);
+
+    struct ggml_tensor * src = ggml_new_tensor_2d(ctx, GGML_TYPE_Q2_KVARN_K, N_TOK, N_CH);
+    struct ggml_tensor * dst = ggml_cast(ctx, src, GGML_TYPE_F32);
+
+    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, dst);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    assert(buf != NULL);
+
+    ggml_backend_tensor_set(src, blocks.data(), 0, ggml_nbytes(src));
+    const enum ggml_status st = ggml_backend_graph_compute(backend, gf);
+    assert(st == GGML_STATUS_SUCCESS);
+
+    std::vector<float> out(N_CH * N_TOK);
+    ggml_backend_tensor_get(dst, out.data(), 0, ggml_nbytes(dst));
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+    return out;
+}
+
 static void assert_matches_ref(const std::vector<block_q2_kvarn_k> & got,
                                const std::vector<block_q2_kvarn_k> & ref) {
     for (int ch = 0; ch < N_CH; ch++) {
@@ -117,6 +148,41 @@ int main(void) {
         } else {
             std::vector<block_q2_kvarn_k> got = run_cpy(gpu, tile);
             assert_matches_ref(got, ref);
+            ggml_backend_free(gpu);
+            printf("PASSED\n");
+        }
+    }
+#endif
+
+    // Reverse path: cast Q2_KVARN_K -> F32 must match the CPU ref dequant.
+    std::vector<float> refdq(N_CH * N_TOK);
+    dequantize_row_q2_kvarn_k(ref.data(), refdq.data(), N_CH, N_TOK);
+
+    auto assert_dq = [&](const std::vector<float> & got) {
+        for (int i = 0; i < N_CH * N_TOK; i++) {
+            const float d = got[i] - refdq[i];
+            assert((d < 0 ? -d : d) <= 1e-4f * (1.0f + (refdq[i] < 0 ? -refdq[i] : refdq[i])));
+        }
+    };
+
+    printf("  cast-back on CPU backend: ");
+    fflush(stdout);
+    {
+        ggml_backend_t cpu = ggml_backend_cpu_init();
+        assert_dq(run_cast_back(cpu, ref));
+        ggml_backend_free(cpu);
+    }
+    printf("PASSED\n");
+
+#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP)
+    printf("  cast-back on CUDA/HIP backend: ");
+    fflush(stdout);
+    {
+        ggml_backend_t gpu = ggml_backend_cuda_init(0);
+        if (!gpu) {
+            printf("SKIP (no device)\n");
+        } else {
+            assert_dq(run_cast_back(gpu, ref));
             ggml_backend_free(gpu);
             printf("PASSED\n");
         }
