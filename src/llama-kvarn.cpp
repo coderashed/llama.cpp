@@ -1,4 +1,5 @@
 #include "llama-kvarn.h"
+#include "ggml.h"
 #include <cmath>
 #include <algorithm>
 #include <cfloat>
@@ -147,6 +148,25 @@ static float kvarn_imb_metric(const float* KVARN_RESTRICT tile, int R, int C) {
     float eps = 1e-8f;
     return (max_col_var / std::max(min_col_var, eps)) *
            (max_row_var / std::max(min_row_var, eps));
+}
+
+void kvarn_varn_op(struct ggml_tensor * dst, int ith, int nth, void * userdata) {
+    (void) nth; (void) userdata;
+    if (ith != 0) {
+        return; // single-task: VarN's best-Imb snapshot is not tile-parallel
+    }
+    const struct ggml_tensor * src = dst->src[0];
+    const int n_tok = (int) src->ne[0];     // VarN columns C (tokens)
+    const int n_ch  = (int) src->ne[1];     // VarN rows R (channels)
+    const size_t nt = (size_t) n_ch * n_tok;
+
+    const float * Tin = (const float *) src->data;
+    float * out = (float *) dst->data;      // packed [T_norm(nt) ++ S_r(n_ch) ++ S_c(n_tok)]
+
+    std::memcpy(out, Tin, nt * sizeof(float));
+    float * S_r = out + nt;
+    float * S_c = S_r + n_ch;
+    kvarn_variance_normalize(out, n_ch, n_tok, 12, -5.0f, 5.0f, S_c, S_r);
 }
 
 void kvarn_variance_normalize(

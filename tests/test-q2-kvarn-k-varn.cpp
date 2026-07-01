@@ -10,6 +10,8 @@
 //   Dequant: (code+z)*block.s * S_c[t] = (code+z)*s_rtn*S_r[ch]*S_c[t] ~= K_orig.
 
 #include "ggml.h"
+#include "ggml-cpu.h"
+#include "ggml-backend.h"
 #include "ggml-quants.h"
 #include "../src/llama-kvarn.h"
 
@@ -45,8 +47,51 @@ static std::vector<float> make_imbalanced_tile(void) {
     return T;
 }
 
+// Verify the ggml custom-op (kvarn_varn_op via ggml_custom_4d) produces the same
+// packed [T_norm ++ S_r ++ S_c] as a direct kvarn_variance_normalize call.
+static void test_custom_op(void) {
+    const int n_ch = 8, n_tok = 8;
+    const int64_t packed = (int64_t) n_ch*n_tok + n_ch + n_tok;
+
+    // Input tile [n_tok, n_ch] F32 (data[t + ch*n_tok] = channel ch, token t).
+    std::vector<float> tile(n_ch * n_tok);
+    for (int ch = 0; ch < n_ch; ch++)
+        for (int t = 0; t < n_tok; t++)
+            tile[t + ch*n_tok] = 0.1f * (float)((ch*3 + t*7) % 11 - 5) * (t == 0 ? 6.0f : 1.0f);
+
+    // Direct reference.
+    std::vector<float> Td = tile, Sc_d(n_tok), Sr_d(n_ch);
+    kvarn_variance_normalize(Td.data(), n_ch, n_tok, 12, -5.0f, 5.0f, Sc_d.data(), Sr_d.data());
+
+    // Custom op on the CPU backend.
+    struct ggml_init_params ip = { ggml_tensor_overhead()*4 + ggml_graph_overhead(), NULL, true };
+    struct ggml_context * ctx = ggml_init(ip);
+    struct ggml_tensor * in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tok, n_ch);
+    struct ggml_tensor * args[1] = { in };
+    struct ggml_tensor * out = ggml_custom_4d(ctx, GGML_TYPE_F32, packed, 1, 1, 1, args, 1, kvarn_varn_op, 1, NULL);
+    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, out);
+
+    ggml_backend_t cpu = ggml_backend_cpu_init();
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, cpu);
+    assert(buf);
+    ggml_backend_tensor_set(in, tile.data(), 0, ggml_nbytes(in));
+    assert(ggml_backend_graph_compute(cpu, gf) == GGML_STATUS_SUCCESS);
+    std::vector<float> got(packed);
+    ggml_backend_tensor_get(out, got.data(), 0, sizeof(float)*packed);
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(cpu);
+    ggml_free(ctx);
+
+    for (int i = 0; i < n_ch*n_tok; i++) assert(fabsf(got[i] - Td[i]) <= 1e-5f);
+    for (int i = 0; i < n_ch;  i++) assert(fabsf(got[n_ch*n_tok + i]        - Sr_d[i]) <= 1e-5f);
+    for (int i = 0; i < n_tok; i++) assert(fabsf(got[n_ch*n_tok + n_ch + i] - Sc_d[i]) <= 1e-5f);
+    printf("  custom-op packed output matches direct VarN: PASSED\n");
+}
+
 int main(void) {
     printf("test-q2-kvarn-k-varn:\n");
+    test_custom_op();
 
     const std::vector<float> K = make_imbalanced_tile();
 
