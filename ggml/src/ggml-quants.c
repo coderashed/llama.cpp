@@ -5967,3 +5967,11 @@ void dequantize_row_q2_kvarn_k_ggml(const void * GGML_RESTRICT x, float * GGML_R
     assert(k % QG2_KVARN == 0);
     dequantize_row_q2_kvarn_k((const block_q2_kvarn_k *) x, y, (int)(k / QG2_KVARN), QG2_KVARN);
 }
+
+void quantize_row_q2_kvarn_k_ref_ggml(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    // ggml from_float contract: k contiguous elements per row. The caller feeds a
+    // channel-major row (one channel's QG2_KVARN tokens per block), so each block
+    // is quantized independently -- identical to a [k/QG2_KVARN x QG2_KVARN] tile.
+    assert(k % QG2_KVARN == 0);
+    quantize_row_q2_kvarn_k_ref(x, (block_q2_kvarn_k *) y, (int)(k / QG2_KVARN), QG2_KVARN);
+}

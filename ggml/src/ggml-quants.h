@@ -32,6 +32,10 @@ GGML_API void dequantize_row_q2_kvarn_k(const block_q2_kvarn_k * GGML_RESTRICT b
 // a multiple of QG2_KVARN. Consecutive blocks are consecutive channels (channel-major).
 GGML_API void dequantize_row_q2_kvarn_k_ggml(const void * GGML_RESTRICT x,
     float * GGML_RESTRICT y, int64_t k);
+// ggml from_float adapter: k must be a multiple of QG2_KVARN. The caller feeds a
+// channel-major row so each QG2_KVARN-token block is quantized independently.
+GGML_API void quantize_row_q2_kvarn_k_ref_ggml(const float * GGML_RESTRICT x,
+    void * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q4_1_ref(const float * GGML_RESTRICT x, block_q4_1 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_q5_0_ref(const float * GGML_RESTRICT x, block_q5_0 * GGML_RESTRICT y, int64_t k);
