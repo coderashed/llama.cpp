@@ -1315,42 +1315,76 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
         const int64_t G        = KVARN_GROUP_SIZE;
         const int64_t head_dim = hparams.n_embd_head_k(il);
         const int64_t n_head   = hparams.n_head_kv(il);
-        // Reconstruct only the groups covering the valid keys, not the full cache
-        // capacity (which for a large context would be enormous). Scales are read from
-        // the persistent per-group caches written by cpy_k_regions (this or an earlier
-        // forward), so decode works, not just cache-sized-to-batch prefill.
-        const int64_t ng = (n_kv + G - 1) / G;
-
-        ggml_tensor * body = ggml_view_3d(ctx, layer.k_body, G, C, ng,
-                layer.k_body->nb[1], layer.k_body->nb[2], 0);        // [G, C, ng]
-        ggml_tensor * D  = ggml_cast(ctx, body, GGML_TYPE_F32);              // [G, C, ng]
-        ggml_tensor * Dp = ggml_cont(ctx, ggml_permute(ctx, D, 1, 0, 2, 3)); // [C, G, ng]
-
+        // Region merge. NOTE n_kv is PADDED (get_n_kv rounds up to a multiple of 256),
+        // so a group count derived from n_kv would include groups that were never
+        // flushed. Use the ACTUAL valid length to decide how many complete body groups
+        // exist; everything after that (the still-filling group PLUS the padded/masked
+        // tail) is read per-token from the authoritative k cache.
+        // Valid length INCLUDING this batch's tokens (cells are not yet applied at
+        // graph-build time, so used_max_p1() would exclude the current query's own key
+        // and drop it into the zero pad -> broken self-attention). For a contiguous
+        // single-stream append this is head + this-batch-size.
+        const int64_t L  = (int64_t) sinfo.head() + (int64_t) sinfo.size();
+        const int64_t ng = L / G;           // complete (flushed) body groups
+        const int64_t rv = L - ng*G;        // valid recent tail (< G, in k_recent FP16)
         static const bool kvarn_varn = getenv("LLAMA_KVARN_VARN") != nullptr;
-        if (kvarn_varn && layer.k_sr && layer.k_sc) {
-            // Persistent scales for these groups: S_r [head_dim,n_head,ng], S_c [G,n_head,ng].
-            ggml_tensor * sr = ggml_view_3d(ctx, layer.k_sr, head_dim, n_head, ng,
-                    layer.k_sr->nb[1], layer.k_sr->nb[2], 0);
-            ggml_tensor * sc = ggml_view_3d(ctx, layer.k_sc, G, n_head, ng,
-                    layer.k_sc->nb[1], layer.k_sc->nb[2], 0);
-            ggml_tensor * Dp4 = ggml_reshape_4d(ctx, Dp, head_dim, n_head, G, ng);
-            // S_r [head_dim,n_head,1,ng] broadcasts over tokens.
-            Dp4 = ggml_mul(ctx, Dp4, ggml_reshape_4d(ctx, sr, head_dim, n_head, 1, ng));
-            // S_c [G,n_head,1,ng] -> [1,n_head,G,ng] broadcasts over channels.
-            ggml_tensor * scb = ggml_cont(ctx, ggml_permute(ctx,
-                    ggml_reshape_4d(ctx, sc, G, n_head, 1, ng), 2, 1, 0, 3));
-            Dp4 = ggml_mul(ctx, Dp4, scb);
-            Dp = ggml_reshape_3d(ctx, Dp4, C, G, ng);
+
+        ggml_tensor * Kbody = nullptr;      // [C, ng*G] F16
+        if (ng > 0) {
+            ggml_tensor * body = ggml_view_3d(ctx, layer.k_body, G, C, ng,
+                    layer.k_body->nb[1], layer.k_body->nb[2], 0);        // [G, C, ng]
+            ggml_tensor * D  = ggml_cast(ctx, body, GGML_TYPE_F32);              // [G, C, ng]
+            ggml_tensor * Dp = ggml_cont(ctx, ggml_permute(ctx, D, 1, 0, 2, 3)); // [C, G, ng]
+
+            if (kvarn_varn && layer.k_sr && layer.k_sc) {
+                ggml_tensor * sr = ggml_view_3d(ctx, layer.k_sr, head_dim, n_head, ng,
+                        layer.k_sr->nb[1], layer.k_sr->nb[2], 0);
+                ggml_tensor * sc = ggml_view_3d(ctx, layer.k_sc, G, n_head, ng,
+                        layer.k_sc->nb[1], layer.k_sc->nb[2], 0);
+                ggml_tensor * Dp4 = ggml_reshape_4d(ctx, Dp, head_dim, n_head, G, ng);
+                Dp4 = ggml_mul(ctx, Dp4, ggml_reshape_4d(ctx, sr, head_dim, n_head, 1, ng));
+                ggml_tensor * scb = ggml_cont(ctx, ggml_permute(ctx,
+                        ggml_reshape_4d(ctx, sc, G, n_head, 1, ng), 2, 1, 0, 3));
+                Dp4 = ggml_mul(ctx, Dp4, scb);
+                Dp = ggml_reshape_3d(ctx, Dp4, C, G, ng);
+            }
+            Kbody = ggml_reshape_2d(ctx, Dp, C, G*ng);                  // [C, ng*G] F32
         }
 
-        ggml_tensor * K2 = ggml_reshape_2d(ctx, Dp, C, G*ng);               // [C, position]
-        ggml_tensor * Kf = ggml_cast(ctx, K2, GGML_TYPE_F16);              // FA-friendly
+        // Valid keys [0, L): body groups [0,ng) ++ recent tail [ng*G, L). Keep F32
+        // through the pad (ggml_pad is F32-only), cast to F16 for flash attention last.
+        ggml_tensor * Kvalid;
+        if (rv > 0) {
+            ggml_tensor * rec = ggml_cast(ctx, ggml_cont(ctx, ggml_view_2d(ctx,
+                    layer.k_recent, C, rv, layer.k_recent->nb[1], 0)), GGML_TYPE_F32); // [C, rv] F32
+            Kvalid = Kbody ? ggml_concat(ctx, Kbody, rec, 1) : rec;     // [C, L] F32
+        } else {
+            Kvalid = Kbody;                                              // [C, L] F32, L==ng*G
+        }
+
+        // L can be 0 here (graph reserve / warmup builds the same graph with empty
+        // cells); produce a well-shaped zero column so the pad below still yields an
+        // [C, n_kv] tensor (values are irrelevant: reserve does not execute).
+        if (!Kvalid) {
+            ggml_tensor * z = ggml_cast(ctx, ggml_cont(ctx, ggml_view_2d(ctx,
+                    layer.k_recent, C, 1, layer.k_recent->nb[1], 0)), GGML_TYPE_F32);
+            Kvalid = ggml_scale(ctx, z, 0.0f);                          // [C, 1] zeros
+        }
+
+        // n_kv is padded (multiple of 256) past the valid length; those positions are
+        // masked, but the tensor must still span n_kv so flash-attention does not read
+        // out of bounds. Pad the position axis with zeros (F32), then cast to F16.
+        const int64_t have = Kvalid->ne[1];
+        ggml_tensor * Kf = have < (int64_t) n_kv
+                ? ggml_pad(ctx, Kvalid, 0, (int64_t) n_kv - have, 0, 0) // [C, n_kv] F32
+                : Kvalid;
+        Kf = ggml_cast(ctx, Kf, GGML_TYPE_F16);
 
         return ggml_view_4d(ctx, Kf,
                 head_dim, n_head, n_kv, ns,
                 ggml_row_size(Kf->type, head_dim),
                 ggml_row_size(Kf->type, C),
-                ggml_row_size(Kf->type, C*(G*ng)),
+                ggml_row_size(Kf->type, C*n_kv),
                 0);
     }
 
@@ -1498,10 +1532,9 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
         fprintf(stderr, "[kvarn] cpy_k_regions il=0 head=%u n_tokens=%lld contig=%d\n",
                 sinfo.head(), (long long)n_tokens, (int)sinfo.is_contiguous());
     }
-    if (!sinfo.is_contiguous() || (sinfo.head() % G) != 0) {
-        return roots;
+    if (!sinfo.is_contiguous()) {
+        return roots; // non-contiguous batch: skip regions (per-token path stays valid)
     }
-    const int64_t base_group = sinfo.head() / G;
 
     // Merge (head-dim, head) into the channel axis: k_cur -> [n_embd_gqa, n_tokens].
     ggml_tensor * k2d = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
@@ -1510,33 +1543,21 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
     // scales at read); otherwise quantize the raw rotated tile as before.
     static const bool kvarn_varn = getenv("LLAMA_KVARN_VARN") != nullptr;
 
-    // Complete groups: transpose each [n_embd_gqa, G] tile to channel-major
-    // [G, n_embd_gqa]. With VarN on, run kvarn_varn_op to normalize the tile and
-    // emit S_r/S_c, quantize T_norm into k_body, and accumulate the per-group scales
-    // ([C,1,n_full] and [1,G,n_full]) for get_k. Without VarN, quantize the tile.
-    const int64_t n_full = n_tokens / G;
-    for (int64_t g = 0; g < n_full; ++g) {
-        const int64_t gg = base_group + g; // absolute group position in the cache
-        ggml_tensor * tile = ggml_view_2d(ctx, k2d, n_embd_gqa, G, k2d->nb[1], g*G*k2d->nb[1]);
-        ggml_tensor * tile_cm = ggml_cont(ctx, ggml_transpose(ctx, tile)); // [G, n_embd_gqa] F32
-        ggml_tensor * dst = ggml_view_2d(ctx, layer.k_body, G, n_embd_gqa,
+    // Flush a complete group tile ([G, n_embd_gqa] F32, token-major rows) into k_body
+    // at absolute group gg: (VarN then) quantize per-channel, and persist S_r/S_c.
+    auto flush_group = [&](ggml_tensor * tile_cm, int64_t gg) {
+        ggml_tensor * body_dst = ggml_view_2d(ctx, layer.k_body, G, n_embd_gqa,
                 layer.k_body->nb[1], gg*layer.k_body->nb[2]);
-
         ggml_tensor * to_quant = tile_cm;
         if (kvarn_varn) {
             const int64_t nt = n_embd_gqa*G;
-            // reshape tile_cm [G, n_embd_gqa] -> [G, head_dim, n_head] for per-head VarN.
-            // Real GGML op (runs on GPU); replaces the CPU-only ggml_custom_4d round-trip.
             ggml_tensor * tile3d = ggml_reshape_3d(ctx, tile_cm, G, n_embd_head, n_head);
             ggml_tensor * op = ggml_kvarn_varn(ctx, tile3d);
             to_quant = ggml_view_2d(ctx, op, G, n_embd_gqa, G*sizeof(float), 0); // T_norm [G, C]
-            // S_r [n_embd_gqa] head-major -> [head_dim, n_head, 1]; S_c [n_head*G] -> [G, n_head, 1].
             ggml_tensor * sr = ggml_reshape_3d(ctx,
                     ggml_view_1d(ctx, op, n_embd_gqa, nt*sizeof(float)), n_embd_head, n_head, 1);
             ggml_tensor * sc = ggml_reshape_3d(ctx,
                     ggml_view_1d(ctx, op, n_head*G, (nt + n_embd_gqa)*sizeof(float)), G, n_head, 1);
-            // Persist into the per-group scale caches at the absolute group position, so
-            // a later (decode) forward can read scales for groups written earlier.
             ggml_tensor * sr_dst = ggml_view_3d(ctx, layer.k_sr, n_embd_head, n_head, 1,
                     layer.k_sr->nb[1], layer.k_sr->nb[2], gg*layer.k_sr->nb[2]);
             ggml_tensor * sc_dst = ggml_view_3d(ctx, layer.k_sc, G, n_head, 1,
@@ -1544,15 +1565,54 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
             roots.push_back(ggml_cpy(ctx, sr, sr_dst));
             roots.push_back(ggml_cpy(ctx, sc, sc_dst));
         }
-        roots.push_back(ggml_cpy(ctx, to_quant, dst)); // F32 -> Q2_KVARN_K (per-channel)
+        roots.push_back(ggml_cpy(ctx, to_quant, body_dst)); // F32 -> Q2_KVARN_K
+    };
+
+    // Split the batch by absolute position so decode (partial groups spanning calls)
+    // works, not just group-aligned prefill:
+    //   lead   -- finish the current partial recent group [p0%G, G)
+    //   middle -- complete groups fully inside this batch (direct quantize)
+    //   trail  -- start the next recent group at offset 0
+    // recent (FP16 [C,G]) persists across calls, so lead reads earlier tokens too.
+    const int64_t p0          = sinfo.head();
+    const int64_t lead_within = p0 % G;
+    const int64_t n_lead      = lead_within == 0 ? 0
+                              : (G - lead_within < n_tokens ? G - lead_within : n_tokens);
+    const int64_t n_after     = n_tokens - n_lead;
+    const int64_t n_mid       = n_after / G;
+    const int64_t n_trail     = n_after - n_mid*G;
+    int64_t tok = 0;
+
+    auto write_recent = [&](int64_t src_tok, int64_t within, int64_t count) {
+        ggml_tensor * src = ggml_view_2d(ctx, k2d, n_embd_gqa, count, k2d->nb[1], src_tok*k2d->nb[1]);
+        ggml_tensor * dst = ggml_view_2d(ctx, layer.k_recent, n_embd_gqa, count,
+                layer.k_recent->nb[1], within*layer.k_recent->nb[1]);
+        roots.push_back(ggml_cpy(ctx, src, dst)); // F32 -> F16
+    };
+
+    if (n_lead > 0) {
+        write_recent(tok, lead_within, n_lead);
+        tok += n_lead;
+        if (lead_within + n_lead == G) {
+            // group complete: flush the full recent buffer (prior + this call).
+            ggml_tensor * rec = ggml_view_2d(ctx, layer.k_recent, n_embd_gqa, G, layer.k_recent->nb[1], 0);
+            ggml_tensor * tile_cm = ggml_cast(ctx,
+                    ggml_cont(ctx, ggml_transpose(ctx, rec)), GGML_TYPE_F32); // [G, C] F32
+            flush_group(tile_cm, p0 / G);
+        }
     }
 
-    // Partial tail (< G tokens): keep FP16 in the rolling recent buffer.
-    const int64_t n_tail = n_tokens - n_full*G;
-    if (n_tail > 0) {
-        ggml_tensor * tail = ggml_view_2d(ctx, k2d, n_embd_gqa, n_tail, k2d->nb[1], n_full*G*k2d->nb[1]);
-        ggml_tensor * dst  = ggml_view_2d(ctx, layer.k_recent, n_embd_gqa, n_tail, layer.k_recent->nb[1], 0);
-        roots.push_back(ggml_cpy(ctx, tail, dst)); // F32 -> F16
+    const int64_t base_group_mid = (p0 + n_lead) / G;
+    for (int64_t g = 0; g < n_mid; ++g) {
+        ggml_tensor * tile = ggml_view_2d(ctx, k2d, n_embd_gqa, G, k2d->nb[1], tok*k2d->nb[1]);
+        ggml_tensor * tile_cm = ggml_cont(ctx, ggml_transpose(ctx, tile)); // [G, n_embd_gqa] F32
+        flush_group(tile_cm, base_group_mid + g);
+        tok += G;
+    }
+
+    if (n_trail > 0) {
+        write_recent(tok, 0, n_trail);
+        tok += n_trail;
     }
 
     return roots;
