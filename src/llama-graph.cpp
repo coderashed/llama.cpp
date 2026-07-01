@@ -2798,7 +2798,15 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    ggml_tensor * cur;
+    // KVARN_FAITHFUL: fused per-channel-K attention (reads k_body directly, no
+    // reconstruct). Returns nullptr unless the gated prefill path applies.
+    ggml_tensor * kvarn_fa = mctx_cur->build_kvarn_fa(ctx0, q, v, kq_mask, kq_scale, il);
+    if (kvarn_fa) {
+        cur = ggml_reshape_2d(ctx0, kvarn_fa, kvarn_fa->ne[0]*kvarn_fa->ne[1], kvarn_fa->ne[2]);
+    } else {
+        cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+    }
     cb(cur, "kqv_out", il);
 
     if (inp->self_v_rot) {

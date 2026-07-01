@@ -998,7 +998,8 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_MAP_CUSTOM2:
             case GGML_OP_MAP_CUSTOM3:
             case GGML_OP_CUSTOM:
-            case GGML_OP_KVARN_VARN: {
+            case GGML_OP_KVARN_VARN:
+            case GGML_OP_KVARN_FA: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
             } break;
             case GGML_OP_CROSS_ENTROPY_LOSS:

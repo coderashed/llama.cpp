@@ -593,6 +593,7 @@ extern "C" {
         GGML_OP_GLU,
 
         GGML_OP_KVARN_VARN,
+        GGML_OP_KVARN_FA,
 
         GGML_OP_COUNT,
     };
@@ -2733,6 +2734,25 @@ extern "C" {
     GGML_API struct ggml_tensor * ggml_kvarn_varn(
             struct ggml_context * ctx,
             struct ggml_tensor  * a);
+
+    // KVARN bespoke per-channel-K flash attention (KVARN_FAITHFUL, fused read path).
+    // Reads channel-major block_q2_kvarn_k K directly (no reconstruct). Inputs:
+    //   q      F32 [head_dim, n_head, n_tok]
+    //   k_body Q2_KVARN_K [G, C, n_groups]   (C = head_dim*n_head_kv)
+    //   s_r    F32 [head_dim, n_head_kv, 1, n_groups]   VarN per-channel scale
+    //   s_c    F32 [G, n_head_kv, 1, n_groups]          VarN per-token scale
+    //   v      F16 [head_dim, n_head_kv, n_kv]
+    //   mask   F32 [n_kv_pad, n_tok_pad]
+    // Output F32 [head_dim, n_head, n_tok]. CUDA/HIP only. Prefill: n_kv % G == 0.
+    GGML_API struct ggml_tensor * ggml_kvarn_fa(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k_body,
+            struct ggml_tensor  * s_r,
+            struct ggml_tensor  * s_c,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * mask,
+            float                 scale);
 
     // loss function
 

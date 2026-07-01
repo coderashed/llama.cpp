@@ -2,6 +2,9 @@
 
 // Bespoke per-channel-K attention increments (KVARN_FAITHFUL, fused FA read path).
 
+// Graph op forward (GGML_OP_KVARN_FA). See kvarn-fa.cu for the src/dst layout contract.
+void ggml_cuda_op_kvarn_fa(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+
 // KQ scores for one group / single head: scores[q,t] = Sc[t] * sum_c Q[c,q] *
 // (code_{c,t} + z[c]) * (s[c] * Sr[c]). Kblocks = C channel-major block_q2_kvarn_k;
 // Q [D,n_q] column-major; scores [n_q,G]. Host buffers (test scaffolding wrapper).

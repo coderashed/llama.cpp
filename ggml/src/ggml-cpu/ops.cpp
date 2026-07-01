@@ -11647,6 +11647,20 @@ void ggml_compute_forward_kvarn_varn(
     }
 }
 
+// ggml_compute_forward_kvarn_fa
+//
+// KVARN bespoke per-channel-K attention is CUDA/HIP only (it reads channel-major
+// block_q2_kvarn_k directly). There is no CPU path: with -ngl on GPU the op's srcs are
+// all device-resident and ggml_backend_sched keeps it on the CUDA backend. If it is
+// ever scheduled on CPU, that is a configuration error, not a silent-fallback case.
+void ggml_compute_forward_kvarn_fa(
+    const struct ggml_compute_params * params,
+          struct ggml_tensor * dst) {
+    GGML_UNUSED(params);
+    GGML_UNUSED(dst);
+    GGML_ABORT("GGML_OP_KVARN_FA has no CPU implementation (CUDA/HIP only)");
+}
+
 // ggml_compute_forward_cross_entropy_loss
 
 static void ggml_compute_forward_cross_entropy_loss_f32(
