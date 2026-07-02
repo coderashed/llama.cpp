@@ -104,7 +104,8 @@ fitting longer contexts or larger batches into the same VRAM, not raw speed.
   workload before relying on it.
 - Simplified relative to the source method. This implementation applies a
   Hadamard rotation plus per-block min/max and a per-block norm correction to
-  both K and V. It does not yet implement the full variance normalization from
-  the KVarN paper (the Sinkhorn-style dual-axis row/column normalization) nor
-  the per-channel-for-K / per-token-for-V quantization-axis split.
+  both K and V. The paper's full scheme - per-channel K quantization plus VarN
+  dual-axis variance normalization (SINQ log-domain std-dev scaling) - is
+  available as an experimental, env-gated path; see
+  [kvarn-faithful.md](kvarn-faithful.md).
 - Flash-attention only. There is no non-FA (mmvq/mmq) path for `q2_kvarn`.
