@@ -43,6 +43,24 @@ static __device__ __forceinline__ void dequantize_q2_0(const void * vx, const in
     v.y = (c1 - 1) * d;
 }
 
+static __device__ __forceinline__ void dequantize_q2_kvarn(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q2_kvarn * x = (const block_q2_kvarn *) vx;
+
+    const float d  = __half2float(x[ib].d);
+    const float s1 = __half2float(x[ib].s1);
+    const float s2 = __half2float(x[ib].s2);
+    const float scale = s1 * s2;
+
+    // cpy_blck_q_f32 pairs element iqs (-> v.x) with element iqs + qk/2 (-> v.y).
+    const int jx = iqs;
+    const int jy = iqs + QK2_KVARN/2;
+    const int cx = (x[ib].qs[jx >> 2] >> ((jx & 3) * 2)) & 0x03;
+    const int cy = (x[ib].qs[jy >> 2] >> ((jy & 3) * 2)) & 0x03;
+
+    v.x = ((float)cx + d) * scale;
+    v.y = ((float)cy + d) * scale;
+}
+
 static __device__ __forceinline__ void dequantize_q2_kvarn_k(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q2_kvarn_k * x = (const block_q2_kvarn_k *) vx;
 
