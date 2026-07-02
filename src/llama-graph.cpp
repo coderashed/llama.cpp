@@ -2790,6 +2790,13 @@ ggml_tensor * llm_graph_context::build_attn(
                 ggml_build_forward_expand(gf, w);
             }
         }
+
+        // Item 07 (KVARN_FAITHFUL): analogous per-token V region write.
+        if (mctx_cur->type_v() == GGML_TYPE_Q2_KVARN) {
+            for (ggml_tensor * w : mctx_cur->cpy_v_regions(ctx0, v_cur, il)) {
+                ggml_build_forward_expand(gf, w);
+            }
+        }
     }
 
     ggml_tensor * kq_mask = inp->get_kq_mask();

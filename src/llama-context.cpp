@@ -2334,9 +2334,11 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         }
     }
 
-    // Headroom for the Phase B/D KVarN per-channel K reconstruction + VarN op
-    // (KVARN_FAITHFUL/03,04): a handful of nodes per layer when the env flags are on.
-    res += 64u*model.hparams.n_layer();
+    // Headroom for the KVarN faithful K (03/04) and V (07) region write/read paths:
+    // a handful of nodes per layer when the env flags are on. V's write pays an
+    // extra transpose vs K's, so its contribution is comparable, not smaller --
+    // this was 64 for K alone; doubled now that V adds its own region ops too.
+    res += 192u*model.hparams.n_layer();
 
     uint32_t n_sampling_nodes = 0;
     uint32_t n_sampling_nodes_max = 0;

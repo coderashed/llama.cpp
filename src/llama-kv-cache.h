@@ -196,6 +196,10 @@ public:
     // starts on a group boundary.
     std::vector<ggml_tensor *> cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il, const slot_info & sinfo) const;
 
+    // Item 07 (KVARN_FAITHFUL): analogous per-token V region write (VarN-normalize
+    // then quantize into v_body, mirrors cpy_k_regions). Empty for non-Q2_KVARN V.
+    std::vector<ggml_tensor *> cpy_v_regions(ggml_context * ctx, ggml_tensor * v_cur, int32_t il, const slot_info & sinfo) const;
+
     // Fused per-channel-K attention (KVARN_FAITHFUL, gated by LLAMA_KVARN_FUSED_FA).
     // Reads k_body + VarN scales directly via ggml_kvarn_fa instead of reconstructing K.
     // Returns [head_dim, n_head, n_tok], or nullptr when the fused path does not apply
@@ -266,6 +270,10 @@ public:
         ggml_tensor * v_sink   = nullptr;
         ggml_tensor * v_body   = nullptr;
         ggml_tensor * v_recent = nullptr;
+        // Persistent per-body-group VarN scales for V (KVARN_FAITHFUL/07), mirrors
+        // k_sr/k_sc exactly (same shapes, same gates, written at cpy_v_regions flush).
+        ggml_tensor * v_sr = nullptr;
+        ggml_tensor * v_sc = nullptr;
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
@@ -429,6 +437,9 @@ public:
 
     // Phase B per-channel K region writes (KVARN_FAITHFUL/03); empty for non-Q2_KVARN.
     std::vector<ggml_tensor *> cpy_k_regions(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const;
+
+    // Item 07 per-token V region writes (KVARN_FAITHFUL/07); empty for non-Q2_KVARN.
+    std::vector<ggml_tensor *> cpy_v_regions(ggml_context * ctx, ggml_tensor * v_cur, int32_t il) const;
 
     // Fused per-channel-K attention (KVARN_FAITHFUL); nullptr when not applicable.
     ggml_tensor * build_kvarn_fa(ggml_context * ctx, ggml_tensor * q, ggml_tensor * v,

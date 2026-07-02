@@ -242,6 +242,10 @@ llama_kv_cache::llama_kv_cache(
         // memory-fit layer placement) for nothing.
         const bool is_kvarn = type_k == GGML_TYPE_Q2_KVARN
             && kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
+        // Item 07: analogous gate for the faithful V regions. Same two env vars as K
+        // (design: kvarn_faithful_v_design.md) -- no new knobs.
+        const bool is_kvarn_v = type_v == GGML_TYPE_Q2_KVARN
+            && kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
 
         ggml_tensor * k = nullptr;
         ggml_tensor * v = nullptr;
@@ -254,6 +258,8 @@ llama_kv_cache::llama_kv_cache(
         ggml_tensor * v_sink   = nullptr;
         ggml_tensor * v_body   = nullptr;
         ggml_tensor * v_recent = nullptr;
+        ggml_tensor * v_sr     = nullptr;
+        ggml_tensor * v_sc     = nullptr;
 
         // The single k tensor remains the authoritative K storage and read path.
         {
@@ -289,6 +295,30 @@ llama_kv_cache::llama_kv_cache(
             ggml_format_name(k_sc,     "cache_k_sc_l%d",     il);
         }
 
+        // Item 07 (KVARN_FAITHFUL): per-token three-region V storage. BODY holds
+        // complete G=128-token groups quantized per-token (block_q2_kvarn), the SAME
+        // container the plain v tensor uses -- VarN is the only delta (design:
+        // kvarn_faithful_v_design.md, storage option A). RECENT mirrors k_recent.
+        if (is_kvarn_v) {
+            const int64_t n_groups   = (kv_size + KVARN_GROUP_SIZE - 1) / KVARN_GROUP_SIZE;
+            const int64_t head_dim   = hparams.n_embd_head_v(il);
+            const int64_t n_head_kv  = hparams.n_head_kv(il);
+
+            // BODY: [channels, G tokens, groups], channel-fastest (matches v_cur/v's
+            // natural layout -- unlike k_body, no axis transpose in the block format).
+            v_body = ggml_new_tensor_3d(ctx, GGML_TYPE_Q2_KVARN, n_embd_v_gqa, KVARN_GROUP_SIZE, n_groups);
+            // RECENT: FP16, one G-sized rolling window of un-quantized tokens.
+            v_recent = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_v_gqa, KVARN_GROUP_SIZE);
+            // Persistent VarN scales, one per group -- same shapes as k_sr/k_sc.
+            v_sr = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_head_kv, n_groups);
+            v_sc = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, KVARN_GROUP_SIZE, n_head_kv, n_groups);
+
+            ggml_format_name(v_body,   "cache_v_body_l%d",   il);
+            ggml_format_name(v_recent, "cache_v_recent_l%d", il);
+            ggml_format_name(v_sr,     "cache_v_sr_l%d",     il);
+            ggml_format_name(v_sc,     "cache_v_sc_l%d",     il);
+        }
+
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
 
@@ -299,7 +329,7 @@ llama_kv_cache::llama_kv_cache(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_sink, k_body, k_recent, k_sr, k_sc, v_sink, v_body, v_recent, k_stream, v_stream });
+        layers.push_back({ il, k, v, k_sink, k_body, k_recent, k_sr, k_sc, v_sink, v_body, v_recent, v_sr, v_sc, k_stream, v_stream });
     }
 
     if (reuse) {
@@ -1476,6 +1506,73 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
 
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
+    // Item 07 (KVARN_FAITHFUL): read V from the per-token body instead of the plain
+    // v tensor. Mirrors get_k's region-merge reconstruct exactly, except the dequant
+    // (v_body -> F32) needs NO permute first: v_body is already channel-fastest
+    // (unlike k_body, whose channel-major block format needs a post-dequant permute).
+    const kv_layer & layer = layers[ikv];
+    static const bool kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
+    if (kvarn_perchannel_read && layer.v_body) {
+        GGML_ASSERT(ns == 1); // single-stream (multi-stream is a later phase)
+        const int64_t C        = n_embd_v_gqa;
+        const int64_t G        = KVARN_GROUP_SIZE;
+        const int64_t head_dim = hparams.n_embd_head_v(il);
+        const int64_t n_head   = hparams.n_head_kv(il);
+        const int64_t L  = (int64_t) sinfo.head() + (int64_t) sinfo.size();
+        const int64_t ng = L / G;
+        const int64_t rv = L - ng*G;
+        static const bool kvarn_varn = kvarn_env_enabled("LLAMA_KVARN_VARN");
+
+        ggml_tensor * Vbody = nullptr; // [C, ng*G] F32
+        if (ng > 0) {
+            ggml_tensor * body = ggml_view_3d(ctx, layer.v_body, C, G, ng,
+                    layer.v_body->nb[1], layer.v_body->nb[2], 0);  // [C, G, ng]
+            ggml_tensor * D = ggml_cast(ctx, body, GGML_TYPE_F32); // [C, G, ng], already channel-fastest
+
+            if (kvarn_varn && layer.v_sr && layer.v_sc) {
+                ggml_tensor * sr = ggml_view_3d(ctx, layer.v_sr, head_dim, n_head, ng,
+                        layer.v_sr->nb[1], layer.v_sr->nb[2], 0);
+                ggml_tensor * sc = ggml_view_3d(ctx, layer.v_sc, G, n_head, ng,
+                        layer.v_sc->nb[1], layer.v_sc->nb[2], 0);
+                ggml_tensor * D4 = ggml_reshape_4d(ctx, D, head_dim, n_head, G, ng);
+                D4 = ggml_mul(ctx, D4, ggml_reshape_4d(ctx, sr, head_dim, n_head, 1, ng));
+                ggml_tensor * scb = ggml_cont(ctx, ggml_permute(ctx,
+                        ggml_reshape_4d(ctx, sc, G, n_head, 1, ng), 2, 1, 0, 3));
+                D4 = ggml_mul(ctx, D4, scb);
+                D = ggml_reshape_3d(ctx, D4, C, G, ng);
+            }
+            Vbody = ggml_reshape_2d(ctx, D, C, G*ng); // [C, ng*G] F32
+        }
+
+        ggml_tensor * Vvalid;
+        if (rv > 0) {
+            ggml_tensor * rec = ggml_cast(ctx, ggml_cont(ctx, ggml_view_2d(ctx,
+                    layer.v_recent, C, rv, layer.v_recent->nb[1], 0)), GGML_TYPE_F32); // [C, rv] F32
+            Vvalid = Vbody ? ggml_concat(ctx, Vbody, rec, 1) : rec;
+        } else {
+            Vvalid = Vbody;
+        }
+
+        if (!Vvalid) {
+            ggml_tensor * z = ggml_cast(ctx, ggml_cont(ctx, ggml_view_2d(ctx,
+                    layer.v_recent, C, 1, layer.v_recent->nb[1], 0)), GGML_TYPE_F32);
+            Vvalid = ggml_scale(ctx, z, 0.0f); // [C, 1] zeros
+        }
+
+        const int64_t have = Vvalid->ne[1];
+        ggml_tensor * Vf = have < (int64_t) n_kv
+                ? ggml_pad(ctx, Vvalid, 0, (int64_t) n_kv - have, 0, 0) // [C, n_kv] F32
+                : Vvalid;
+        Vf = ggml_cast(ctx, Vf, GGML_TYPE_F16);
+
+        return ggml_view_4d(ctx, Vf,
+                head_dim, n_head, n_kv, ns,
+                ggml_row_size(Vf->type, head_dim),
+                ggml_row_size(Vf->type, C),
+                ggml_row_size(Vf->type, C*n_kv),
+                0);
+    }
+
     ggml_tensor * vv;
     if (!v_trans) {
         // note: v->nb[1] <= v->nb[2]
@@ -1500,8 +1597,7 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
     // returns NONE for a non-q2_kvarn type mismatch), so a mismatched K=F16/V=q4_0 forces
     // ALL attention onto the CPU backend. Cast V to F16 to match reconstructed K and keep
     // flash-attn on the GPU. q4_0 -> F16 direct dup is unsupported, so go via F32.
-    static const bool kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
-    if (kvarn_perchannel_read && layers[ikv].k_body && ggml_is_quantized(vv->type)) {
+    if (kvarn_perchannel_read && layer.k_body && ggml_is_quantized(vv->type)) {
         vv = ggml_cont(ctx, ggml_cast(ctx, ggml_cast(ctx, vv, GGML_TYPE_F32), GGML_TYPE_F16));
     }
 
@@ -1650,6 +1746,111 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
         ggml_tensor * tile = ggml_view_2d(ctx, k2d, n_embd_gqa, G, k2d->nb[1], tok*k2d->nb[1]);
         ggml_tensor * tile_cm = ggml_cont(ctx, ggml_transpose(ctx, tile)); // [G, n_embd_gqa] F32
         flush_group(tile_cm, base_group_mid + g);
+        tok += G;
+    }
+
+    if (n_trail > 0) {
+        write_recent(tok, 0, n_trail);
+        tok += n_trail;
+    }
+
+    return roots;
+}
+
+std::vector<ggml_tensor *> llama_kv_cache::cpy_v_regions(ggml_context * ctx, ggml_tensor * v_cur, int32_t il, const slot_info & sinfo) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    const kv_layer & layer = layers[ikv];
+
+    std::vector<ggml_tensor *> roots;
+
+    // Only faithful-V layers have the region tensors allocated.
+    if (!layer.v_body || !layer.v_recent) {
+        return roots;
+    }
+
+    static const bool kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
+    if (!kvarn_perchannel_read) {
+        return roots;
+    }
+
+    const int64_t n_embd_head = v_cur->ne[0];
+    const int64_t n_head      = v_cur->ne[1];
+    const int64_t n_tokens    = v_cur->ne[2];
+    const int64_t n_embd_gqa  = n_embd_head*n_head;
+    const int64_t G           = KVARN_GROUP_SIZE;
+
+    // Prefill-only prototype, same constraint as cpy_k_regions.
+    if (!sinfo.is_contiguous()) {
+        return roots;
+    }
+
+    // Merge (head-dim, head) into the channel axis: v_cur -> [n_embd_gqa, n_tokens],
+    // channel-fastest (v's natural layout; unlike K, no transpose needed here).
+    ggml_tensor * v2d = ggml_view_2d(ctx, v_cur, n_embd_gqa, n_tokens, v_cur->nb[2], 0);
+
+    static const bool kvarn_varn = kvarn_env_enabled("LLAMA_KVARN_VARN");
+
+    // Flush a complete group tile ([n_embd_gqa, G] F32, channel-fastest) into v_body
+    // at absolute group gg. Unlike K (whose channel-major block format happens to
+    // match VarN's natural [G, C] output shape), V's per-token block format wants
+    // channel-fastest, so this transposes IN (for VarN) and OUT (for the quantize)
+    // -- the extra transpose K pays at read, V pays at write.
+    auto flush_group_v = [&](ggml_tensor * tile_ch, int64_t gg) {
+        ggml_tensor * body_dst = ggml_view_2d(ctx, layer.v_body, n_embd_gqa, G,
+                layer.v_body->nb[1], gg*layer.v_body->nb[2]);
+        ggml_tensor * to_quant = tile_ch;
+        if (kvarn_varn) {
+            ggml_tensor * tile_tok = ggml_cont(ctx, ggml_transpose(ctx, tile_ch)); // [G, n_embd_gqa]
+            const int64_t nt = n_embd_gqa*G;
+            ggml_tensor * tile3d = ggml_reshape_3d(ctx, tile_tok, G, n_embd_head, n_head);
+            ggml_tensor * op = ggml_kvarn_varn(ctx, tile3d);
+            ggml_tensor * Tn_tok = ggml_view_2d(ctx, op, G, n_embd_gqa, G*sizeof(float), 0); // [G, C]
+            to_quant = ggml_cont(ctx, ggml_transpose(ctx, Tn_tok));                          // [C, G]
+            ggml_tensor * sr = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_embd_gqa, nt*sizeof(float)), n_embd_head, n_head, 1);
+            ggml_tensor * sc = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_head*G, (nt + n_embd_gqa)*sizeof(float)), G, n_head, 1);
+            ggml_tensor * sr_dst = ggml_view_3d(ctx, layer.v_sr, n_embd_head, n_head, 1,
+                    layer.v_sr->nb[1], layer.v_sr->nb[2], gg*layer.v_sr->nb[2]);
+            ggml_tensor * sc_dst = ggml_view_3d(ctx, layer.v_sc, G, n_head, 1,
+                    layer.v_sc->nb[1], layer.v_sc->nb[2], gg*layer.v_sc->nb[2]);
+            roots.push_back(ggml_cpy(ctx, sr, sr_dst));
+            roots.push_back(ggml_cpy(ctx, sc, sc_dst));
+        }
+        roots.push_back(ggml_cpy(ctx, to_quant, body_dst)); // F32 -> Q2_KVARN
+    };
+
+    // Same lead/middle/trail split as cpy_k_regions.
+    const int64_t p0          = sinfo.head();
+    const int64_t lead_within = p0 % G;
+    const int64_t n_lead      = lead_within == 0 ? 0
+                              : (G - lead_within < n_tokens ? G - lead_within : n_tokens);
+    const int64_t n_after     = n_tokens - n_lead;
+    const int64_t n_mid       = n_after / G;
+    const int64_t n_trail     = n_after - n_mid*G;
+    int64_t tok = 0;
+
+    auto write_recent = [&](int64_t src_tok, int64_t within, int64_t count) {
+        ggml_tensor * src = ggml_view_2d(ctx, v2d, n_embd_gqa, count, v2d->nb[1], src_tok*v2d->nb[1]);
+        ggml_tensor * dst = ggml_view_2d(ctx, layer.v_recent, n_embd_gqa, count,
+                layer.v_recent->nb[1], within*layer.v_recent->nb[1]);
+        roots.push_back(ggml_cpy(ctx, src, dst)); // F32 -> F16
+    };
+
+    if (n_lead > 0) {
+        write_recent(tok, lead_within, n_lead);
+        tok += n_lead;
+        if (lead_within + n_lead == G) {
+            ggml_tensor * rec = ggml_view_2d(ctx, layer.v_recent, n_embd_gqa, G, layer.v_recent->nb[1], 0);
+            ggml_tensor * tile_ch = ggml_cast(ctx, rec, GGML_TYPE_F32); // [n_embd_gqa, G] F32, channel-fastest
+            flush_group_v(tile_ch, p0 / G);
+        }
+    }
+
+    const int64_t base_group_mid = (p0 + n_lead) / G;
+    for (int64_t g = 0; g < n_mid; ++g) {
+        ggml_tensor * tile_ch = ggml_view_2d(ctx, v2d, n_embd_gqa, G, v2d->nb[1], tok*v2d->nb[1]);
+        flush_group_v(tile_ch, base_group_mid + g);
         tok += G;
     }
 
@@ -2946,6 +3147,11 @@ ggml_tensor * llama_kv_cache_context::build_kvarn_fa(ggml_context * ctx, ggml_te
 ggml_tensor * llama_kv_cache_context::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const {
     return kv->cpy_v(ctx, v_cur, v_idxs, il, sinfos[i_cur]);
 }
+
+std::vector<ggml_tensor *> llama_kv_cache_context::cpy_v_regions(ggml_context * ctx, ggml_tensor * v_cur, int32_t il) const {
+    return kv->cpy_v_regions(ctx, v_cur, il, sinfos[i_cur]);
+}
+
 
 ggml_tensor * llama_kv_cache_context::build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const {
     return kv->build_input_k_idxs(ctx, ubatch);
