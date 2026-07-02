@@ -22,9 +22,10 @@
 #include <cstring>
 #include <vector>
 
-// Test 1: enum value registered, directly before GGML_TYPE_COUNT.
+// Test 1: enum value registered at its pinned slot (43; the 3/4-bit
+// KVARN_MULTIBIT siblings follow it).
 static void test_enum_value(void) {
-    assert(GGML_TYPE_Q2_KVARN_K == GGML_TYPE_COUNT - 1);
+    assert(GGML_TYPE_Q2_KVARN_K == 43);
     const char * name = ggml_type_name(GGML_TYPE_Q2_KVARN_K);
     assert(name != NULL);
     assert(name[0] != '\0');

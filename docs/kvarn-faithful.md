@@ -60,6 +60,27 @@ LLAMA_KVARN_PERCHANNEL_READ=1 LLAMA_KVARN_VARN=1 \
   llama-server -m model.gguf -ctk q2_kvarn -ctv q4_0 -fa on -ngl 999 --parallel 1
 ```
 
+## Faithful V and bit widths (3-bit / 4-bit)
+
+With both gates set, `-ctv q2_kvarn` additionally routes V through the same
+three-region scheme (VarN-normalized group tiles, per-token quantization,
+reconstruction on read). The 3-bit and 4-bit siblings `q3_kvarn` and `q4_kvarn`
+are accepted by both `-ctk` and `-ctv`; they exist only on the faithful path
+and refuse to start without the two gates. The fused attention op stays 2-bit
+only; 3/4-bit K always uses reconstruction.
+
+KL divergence vs f16 (Qwen3.6-35B-A3B UD-Q6_K, wikitext-2, 16 chunks):
+
+| `-ctk` / `-ctv`       | mean KLD | 99.9% KLD | PPL ratio |
+|-----------------------|----------|-----------|-----------|
+| q2_kvarn / q2_kvarn   | 0.0575   | 1.04      | 1.047     |
+| q2_kvarn / q4_kvarn   | 0.0259   | 0.76      | 1.026     |
+| q3_kvarn / q3_kvarn   | 0.0188   | 0.28      | 1.010     |
+| q4_kvarn / q4_kvarn   | 0.0092   | 0.23      | 1.006     |
+
+`q3_kvarn` for both K and V is the recommended starting point: under 1% PPL
+cost at just over 3 bits per element.
+
 ## Performance and limitations
 
 - **Prefill is roughly 2x slower** than the per-token path on long prompts.
@@ -70,7 +91,9 @@ LLAMA_KVARN_PERCHANNEL_READ=1 LLAMA_KVARN_VARN=1 \
   graph-build overhead to decode.
 - **Single stream only**: the read path asserts one sequence stream, so the
   server must run with `--parallel 1`.
-- **K-side only**: V stays whatever `-ctv` selects (`q4_0` recommended).
+- **V options**: plain `-ctv q4_0` (no faithful machinery) or a kvarn type
+  for the faithful V path; at 4 bits the two measure the same, so faithful V
+  earns its cost only at 3 bits and below.
 - **head_dim up to 256** is supported on the GPU (CUDA/HIP); this covers
   current large models.
 - Large contexts with the gates on can hit a graph node-budget abort; the

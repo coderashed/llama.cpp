@@ -432,7 +432,11 @@ extern "C" {
         GGML_TYPE_Q2_0    = 42,
         GGML_TYPE_Q2_KVARN = 43,
         GGML_TYPE_Q2_KVARN_K = 44, // per-channel K (KVarN body), block_q2_kvarn_k
-        GGML_TYPE_COUNT   = 45,
+        GGML_TYPE_Q3_KVARN = 45,
+        GGML_TYPE_Q3_KVARN_K = 46,
+        GGML_TYPE_Q4_KVARN = 47,
+        GGML_TYPE_Q4_KVARN_K = 48,
+        GGML_TYPE_COUNT   = 49,
     };
 
     // precision

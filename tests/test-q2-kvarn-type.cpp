@@ -30,13 +30,13 @@ static void test_struct_size(void) {
 }
 
 // Test 2: Enum value registration
-// GGML_TYPE_Q2_KVARN must be 42; Q2_KVARN_K is 43; GGML_TYPE_COUNT = 44
+// GGML_TYPE_Q2_KVARN must be 42; Q2_KVARN_K is 43; the 3/4-bit siblings
+// (KVARN_MULTIBIT) follow at 44-47, so GGML_TYPE_COUNT = 48.
 static void test_enum_value(void) {
     // This will fail to compile until GGML_TYPE_Q2_KVARN is added to the ggml_type enum
     assert(GGML_TYPE_Q2_KVARN == 42);
-    // GGML_TYPE_Q2_KVARN_K == 43 (per-channel K, KVARN_FAITHFUL/03) sits between
-    // Q2_KVARN and COUNT, so COUNT is now 44.
-    assert(GGML_TYPE_COUNT == 44);
+    assert(GGML_TYPE_Q2_KVARN_K == 43);
+    assert(GGML_TYPE_COUNT == 48);
 
     // ggml_type_name must return a non-null, non-empty string
     const char * name = ggml_type_name(GGML_TYPE_Q2_KVARN);

@@ -219,6 +219,45 @@ typedef struct {
 } block_q2_kvarn_k;
 static_assert(sizeof(block_q2_kvarn_k) == 32 + 2 + 2, "wrong q2_kvarn_k block size");
 
+// 3-bit and 4-bit KVarN siblings (KVARN_MULTIBIT). Same layout conventions as
+// the 2-bit originals; only the code width changes. 3-bit packs the low 2 bits
+// in ql (same scheme as the 2-bit qs) and the high bit in qh (1 bit/element).
+#define QK3_KVARN 128
+typedef struct {
+    uint8_t  ql[QK3_KVARN / 4]; // low 2 bits, 4 elements/byte
+    uint8_t  qh[QK3_KVARN / 8]; // high bit, 8 elements/byte
+    ggml_half d;                 // FP16 zeropoint in quantized units
+    ggml_half s1;                // FP16 primary scale
+    ggml_half s2;                // FP16 norm-match scale
+} block_q3_kvarn;
+static_assert(sizeof(block_q3_kvarn) == 32 + 16 + 2 + 2 + 2, "wrong q3_kvarn block size/padding");
+
+#define QK4_KVARN 128
+typedef struct {
+    uint8_t  qs[QK4_KVARN / 2]; // 4-bit packed, 2 elements/byte (low nibble first)
+    ggml_half d;
+    ggml_half s1;
+    ggml_half s2;
+} block_q4_kvarn;
+static_assert(sizeof(block_q4_kvarn) == 64 + 2 + 2 + 2, "wrong q4_kvarn block size/padding");
+
+#define QG3_KVARN 128
+typedef struct {
+    uint8_t   ql[QG3_KVARN / 4];
+    uint8_t   qh[QG3_KVARN / 8];
+    ggml_half s;
+    ggml_half z;
+} block_q3_kvarn_k;
+static_assert(sizeof(block_q3_kvarn_k) == 32 + 16 + 2 + 2, "wrong q3_kvarn_k block size");
+
+#define QG4_KVARN 128
+typedef struct {
+    uint8_t   qs[QG4_KVARN / 2];
+    ggml_half s;
+    ggml_half z;
+} block_q4_kvarn_k;
+static_assert(sizeof(block_q4_kvarn_k) == 64 + 2 + 2, "wrong q4_kvarn_k block size");
+
 #define QK4_0 32
 typedef struct {
     ggml_half d;           // delta

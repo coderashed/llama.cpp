@@ -256,6 +256,131 @@ void quantize_row_q2_kvarn_varn(const float * GGML_RESTRICT x, void * GGML_RESTR
     }
 }
 
+// Shared scalar-scale search for the KVarN 3/4-bit siblings: min/max with the
+// 02b MSE-clip grid, parameterized by the top code level qmax. Mirrors the
+// 2-bit search in quantize_q2_kvarn_block, which is kept separate so the proven
+// 2-bit path stays byte-identical. The CUDA mirror in cpy-utils.cuh keeps the
+// same iteration order and strict-< tie-break.
+static void kvarn_scalar_scale(const float * GGML_RESTRICT x, int n, float qmax,
+        float * GGML_RESTRICT lo_out, float * GGML_RESTRICT s_out) {
+    float min_val =  FLT_MAX;
+    float max_val = -FLT_MAX;
+    for (int j = 0; j < n; j++) {
+        const float v = x[j];
+        if (v < min_val) min_val = v;
+        if (v > max_val) max_val = v;
+    }
+
+    const float range = max_val - min_val;
+    if (range <= 0.0f) {
+        *lo_out = min_val;
+        *s_out  = 1.0f;
+        return;
+    }
+
+    static const float F[5] = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
+    const float center = 0.5f * (min_val + max_val);
+    float best_mse = FLT_MAX;
+    float best_f   = 1.0f;
+
+    for (int fi = 0; fi < 5; fi++) {
+        const float f     = F[fi];
+        const float half  = 0.5f * f * range;
+        const float lo_f  = center - half;
+        const float s_f   = f * range / qmax;
+        const float inv_f = 1.0f / s_f;
+
+        float mse = 0.0f;
+        for (int j = 0; j < n; j++) {
+            float val = (x[j] - lo_f) * inv_f;
+            if (val < 0.0f) val = 0.0f;
+            if (val > qmax) val = qmax;
+            const float q  = (float)(uint8_t)(val + 0.5f);
+            const float r  = q * s_f + lo_f;
+            const float d_ = x[j] - r;
+            mse += d_ * d_;
+        }
+        if (mse < best_mse) {
+            best_mse = mse;
+            best_f   = f;
+        }
+    }
+
+    const float half = 0.5f * best_f * range;
+    *lo_out = center - half;
+    *s_out  = best_f * range / qmax;
+}
+
+static void quantize_q3_kvarn_block(const float * GGML_RESTRICT x, block_q3_kvarn * GGML_RESTRICT y) {
+    float lo, s1;
+    kvarn_scalar_scale(x, QK3_KVARN, 7.0f, &lo, &s1);
+    const float inv = 1.0f / s1;
+    const float zp  = lo * inv;
+
+    memset(y->ql, 0, sizeof(y->ql));
+    memset(y->qh, 0, sizeof(y->qh));
+
+    float sum_sq_orig = 0.0f;
+    float sum_sq_dq   = 0.0f;
+    for (int j = 0; j < QK3_KVARN; j++) {
+        float val = (x[j] - lo) * inv;
+        if (val < 0.0f) val = 0.0f;
+        if (val > 7.0f) val = 7.0f;
+        const uint8_t q = (uint8_t)(val + 0.5f);
+        y->ql[j >> 2] |= (uint8_t)((q & 3) << ((j & 3) * 2));
+        y->qh[j >> 3] |= (uint8_t)((q >> 2) << (j & 7));
+        const float dq = ((float)q + zp) * s1;
+        sum_sq_dq   += dq * dq;
+        sum_sq_orig += x[j] * x[j];
+    }
+    const float norm_dq = sqrtf(sum_sq_dq);
+    y->d  = GGML_FP32_TO_FP16(zp);
+    y->s1 = GGML_FP32_TO_FP16(s1);
+    y->s2 = GGML_FP32_TO_FP16(norm_dq > 1e-10f ? sqrtf(sum_sq_orig) / norm_dq : 1.0f);
+}
+
+static void quantize_q4_kvarn_block(const float * GGML_RESTRICT x, block_q4_kvarn * GGML_RESTRICT y) {
+    float lo, s1;
+    kvarn_scalar_scale(x, QK4_KVARN, 15.0f, &lo, &s1);
+    const float inv = 1.0f / s1;
+    const float zp  = lo * inv;
+
+    memset(y->qs, 0, sizeof(y->qs));
+
+    float sum_sq_orig = 0.0f;
+    float sum_sq_dq   = 0.0f;
+    for (int j = 0; j < QK4_KVARN; j++) {
+        float val = (x[j] - lo) * inv;
+        if (val < 0.0f)  val = 0.0f;
+        if (val > 15.0f) val = 15.0f;
+        const uint8_t q = (uint8_t)(val + 0.5f);
+        y->qs[j >> 1] |= (uint8_t)(q << ((j & 1) * 4));
+        const float dq = ((float)q + zp) * s1;
+        sum_sq_dq   += dq * dq;
+        sum_sq_orig += x[j] * x[j];
+    }
+    const float norm_dq = sqrtf(sum_sq_dq);
+    y->d  = GGML_FP32_TO_FP16(zp);
+    y->s1 = GGML_FP32_TO_FP16(s1);
+    y->s2 = GGML_FP32_TO_FP16(norm_dq > 1e-10f ? sqrtf(sum_sq_orig) / norm_dq : 1.0f);
+}
+
+void quantize_row_q3_kvarn_ref(const float * GGML_RESTRICT x, block_q3_kvarn * GGML_RESTRICT y, int64_t k) {
+    GGML_ASSERT(k % QK3_KVARN == 0);
+    const int nb = k / QK3_KVARN;
+    for (int i = 0; i < nb; i++) {
+        quantize_q3_kvarn_block(x + i * QK3_KVARN, &y[i]);
+    }
+}
+
+void quantize_row_q4_kvarn_ref(const float * GGML_RESTRICT x, block_q4_kvarn * GGML_RESTRICT y, int64_t k) {
+    GGML_ASSERT(k % QK4_KVARN == 0);
+    const int nb = k / QK4_KVARN;
+    for (int i = 0; i < nb; i++) {
+        quantize_q4_kvarn_block(x + i * QK4_KVARN, &y[i]);
+    }
+}
+
 // reference implementation for deterministic creation of model files
 void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
@@ -663,6 +788,43 @@ void dequantize_row_q2_kvarn(const block_q2_kvarn * GGML_RESTRICT x, float * GGM
                 const float qval = (float)((byte >> (b * 2)) & 0x03);
                 y[i * qk + j * 4 + b] = (qval + d) * combined_scale;
             }
+        }
+    }
+}
+
+void dequantize_row_q3_kvarn(const block_q3_kvarn * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK3_KVARN;
+
+    GGML_ASSERT(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d     = GGML_FP16_TO_FP32(x[i].d);
+        const float scale = GGML_FP16_TO_FP32(x[i].s1) * GGML_FP16_TO_FP32(x[i].s2);
+
+        for (int j = 0; j < qk; j++) {
+            const int lo = (x[i].ql[j >> 2] >> ((j & 3) * 2)) & 0x03;
+            const int hi = (x[i].qh[j >> 3] >> (j & 7)) & 0x01;
+            y[i * qk + j] = ((float)(lo | (hi << 2)) + d) * scale;
+        }
+    }
+}
+
+void dequantize_row_q4_kvarn(const block_q4_kvarn * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK4_KVARN;
+
+    GGML_ASSERT(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d     = GGML_FP16_TO_FP32(x[i].d);
+        const float scale = GGML_FP16_TO_FP32(x[i].s1) * GGML_FP16_TO_FP32(x[i].s2);
+
+        for (int j = 0; j < qk; j++) {
+            const int code = (x[i].qs[j >> 1] >> ((j & 1) * 4)) & 0x0F;
+            y[i * qk + j] = ((float)code + d) * scale;
         }
     }
 }
@@ -2304,6 +2466,36 @@ size_t quantize_q2_kvarn(const float * GGML_RESTRICT src, void * GGML_RESTRICT d
     char * qrow = (char *)dst;
     for (int64_t row = 0; row < nrow; ++row) {
         quantize_row_q2_kvarn_ref(src, (block_q2_kvarn *)qrow, n_per_row);
+        src += n_per_row;
+        qrow += row_size;
+    }
+    return nrow * row_size;
+}
+
+size_t quantize_q3_kvarn(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    if (!quant_weights) {
+        quantize_row_q3_kvarn_ref(src, dst, (int64_t)nrow * n_per_row);
+        return nrow * ggml_row_size(GGML_TYPE_Q3_KVARN, n_per_row);
+    }
+    size_t row_size = ggml_row_size(GGML_TYPE_Q3_KVARN, n_per_row);
+    char * qrow = (char *)dst;
+    for (int64_t row = 0; row < nrow; ++row) {
+        quantize_row_q3_kvarn_ref(src, (block_q3_kvarn *)qrow, n_per_row);
+        src += n_per_row;
+        qrow += row_size;
+    }
+    return nrow * row_size;
+}
+
+size_t quantize_q4_kvarn(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    if (!quant_weights) {
+        quantize_row_q4_kvarn_ref(src, dst, (int64_t)nrow * n_per_row);
+        return nrow * ggml_row_size(GGML_TYPE_Q4_KVARN, n_per_row);
+    }
+    size_t row_size = ggml_row_size(GGML_TYPE_Q4_KVARN, n_per_row);
+    char * qrow = (char *)dst;
+    for (int64_t row = 0; row < nrow; ++row) {
+        quantize_row_q4_kvarn_ref(src, (block_q4_kvarn *)qrow, n_per_row);
         src += n_per_row;
         qrow += row_size;
     }
@@ -5974,4 +6166,108 @@ void quantize_row_q2_kvarn_k_ref_ggml(const float * GGML_RESTRICT x, void * GGML
     // is quantized independently -- identical to a [k/QG2_KVARN x QG2_KVARN] tile.
     assert(k % QG2_KVARN == 0);
     quantize_row_q2_kvarn_k_ref(x, (block_q2_kvarn_k *) y, (int)(k / QG2_KVARN), QG2_KVARN);
+}
+
+// 3-bit and 4-bit per-channel siblings (KVARN_MULTIBIT). Same contracts as the
+// 2-bit functions above; the scale search is the shared kvarn_scalar_scale.
+
+void quantize_row_q3_kvarn_k_ref(const float * GGML_RESTRICT tile,
+        block_q3_kvarn_k * GGML_RESTRICT out, int n_ch, int n_tok) {
+    for (int ch = 0; ch < n_ch; ch++) {
+        const float * x = tile + ch * n_tok;
+        block_q3_kvarn_k * blk = &out[ch];
+
+        float lo, s;
+        kvarn_scalar_scale(x, n_tok, 7.0f, &lo, &s);
+        const float inv = 1.0f / s;
+
+        blk->s = GGML_FP32_TO_FP16(s);
+        blk->z = GGML_FP32_TO_FP16(lo * inv);
+
+        memset(blk->ql, 0, sizeof(blk->ql));
+        memset(blk->qh, 0, sizeof(blk->qh));
+        for (int j = 0; j < n_tok; j++) {
+            float val = (x[j] - lo) * inv;
+            if (val < 0.0f) val = 0.0f;
+            if (val > 7.0f) val = 7.0f;
+            const uint8_t q = (uint8_t)(val + 0.5f);
+            blk->ql[j >> 2] |= (uint8_t)((q & 3) << ((j & 3) * 2));
+            blk->qh[j >> 3] |= (uint8_t)((q >> 2) << (j & 7));
+        }
+    }
+}
+
+void quantize_row_q4_kvarn_k_ref(const float * GGML_RESTRICT tile,
+        block_q4_kvarn_k * GGML_RESTRICT out, int n_ch, int n_tok) {
+    for (int ch = 0; ch < n_ch; ch++) {
+        const float * x = tile + ch * n_tok;
+        block_q4_kvarn_k * blk = &out[ch];
+
+        float lo, s;
+        kvarn_scalar_scale(x, n_tok, 15.0f, &lo, &s);
+        const float inv = 1.0f / s;
+
+        blk->s = GGML_FP32_TO_FP16(s);
+        blk->z = GGML_FP32_TO_FP16(lo * inv);
+
+        memset(blk->qs, 0, sizeof(blk->qs));
+        for (int j = 0; j < n_tok; j++) {
+            float val = (x[j] - lo) * inv;
+            if (val < 0.0f)  val = 0.0f;
+            if (val > 15.0f) val = 15.0f;
+            const uint8_t q = (uint8_t)(val + 0.5f);
+            blk->qs[j >> 1] |= (uint8_t)(q << ((j & 1) * 4));
+        }
+    }
+}
+
+void dequantize_row_q3_kvarn_k(const block_q3_kvarn_k * GGML_RESTRICT blocks,
+        float * GGML_RESTRICT tile, int n_ch, int n_tok) {
+    for (int ch = 0; ch < n_ch; ch++) {
+        const block_q3_kvarn_k * blk = &blocks[ch];
+        const float s = GGML_FP16_TO_FP32(blk->s);
+        const float z = GGML_FP16_TO_FP32(blk->z);
+        float * dst = tile + ch * n_tok;
+
+        for (int j = 0; j < n_tok; j++) {
+            const int lo = (blk->ql[j >> 2] >> ((j & 3) * 2)) & 0x03;
+            const int hi = (blk->qh[j >> 3] >> (j & 7)) & 0x01;
+            dst[j] = ((float)(lo | (hi << 2)) + z) * s;
+        }
+    }
+}
+
+void dequantize_row_q4_kvarn_k(const block_q4_kvarn_k * GGML_RESTRICT blocks,
+        float * GGML_RESTRICT tile, int n_ch, int n_tok) {
+    for (int ch = 0; ch < n_ch; ch++) {
+        const block_q4_kvarn_k * blk = &blocks[ch];
+        const float s = GGML_FP16_TO_FP32(blk->s);
+        const float z = GGML_FP16_TO_FP32(blk->z);
+        float * dst = tile + ch * n_tok;
+
+        for (int j = 0; j < n_tok; j++) {
+            const int code = (blk->qs[j >> 1] >> ((j & 1) * 4)) & 0x0F;
+            dst[j] = ((float)code + z) * s;
+        }
+    }
+}
+
+void dequantize_row_q3_kvarn_k_ggml(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QG3_KVARN == 0);
+    dequantize_row_q3_kvarn_k((const block_q3_kvarn_k *) x, y, (int)(k / QG3_KVARN), QG3_KVARN);
+}
+
+void dequantize_row_q4_kvarn_k_ggml(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QG4_KVARN == 0);
+    dequantize_row_q4_kvarn_k((const block_q4_kvarn_k *) x, y, (int)(k / QG4_KVARN), QG4_KVARN);
+}
+
+void quantize_row_q3_kvarn_k_ref_ggml(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    assert(k % QG3_KVARN == 0);
+    quantize_row_q3_kvarn_k_ref(x, (block_q3_kvarn_k *) y, (int)(k / QG3_KVARN), QG3_KVARN);
+}
+
+void quantize_row_q4_kvarn_k_ref_ggml(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    assert(k % QG4_KVARN == 0);
+    quantize_row_q4_kvarn_k_ref(x, (block_q4_kvarn_k *) y, (int)(k / QG4_KVARN), QG4_KVARN);
 }

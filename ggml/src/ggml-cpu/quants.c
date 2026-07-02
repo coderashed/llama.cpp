@@ -72,6 +72,22 @@ void quantize_row_q2_kvarn_k(const float * GGML_RESTRICT x, void * GGML_RESTRICT
     quantize_row_q2_kvarn_k_ref_ggml(x, y, k);
 }
 
+void quantize_row_q3_kvarn(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q3_kvarn_ref(x, (block_q3_kvarn *) y, k);
+}
+
+void quantize_row_q3_kvarn_k(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q3_kvarn_k_ref_ggml(x, y, k);
+}
+
+void quantize_row_q4_kvarn(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q4_kvarn_ref(x, (block_q4_kvarn *) y, k);
+}
+
+void quantize_row_q4_kvarn_k(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q4_kvarn_k_ref_ggml(x, y, k);
+}
+
 //
 // 2-6 bit quantization in super-blocks
 //

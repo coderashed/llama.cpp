@@ -5807,6 +5807,10 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_Q8_K:
         case GGML_TYPE_Q2_KVARN:
         case GGML_TYPE_Q2_KVARN_K:
+        case GGML_TYPE_Q3_KVARN:
+        case GGML_TYPE_Q3_KVARN_K:
+        case GGML_TYPE_Q4_KVARN:
+        case GGML_TYPE_Q4_KVARN_K:
         case GGML_TYPE_I8:
         case GGML_TYPE_I16:
         case GGML_TYPE_I32:

@@ -707,6 +707,38 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_q2_kvarn_k_ggml,
         .from_float_ref           = (ggml_from_float_t) quantize_row_q2_kvarn_k_ref_ggml,
     },
+    [GGML_TYPE_Q3_KVARN] = {
+        .type_name                = "q3_kvarn",
+        .blck_size                = QK3_KVARN,
+        .type_size                = sizeof(block_q3_kvarn),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_q3_kvarn,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q3_kvarn_ref,
+    },
+    [GGML_TYPE_Q3_KVARN_K] = {
+        .type_name                = "q3_kvarn_k",
+        .blck_size                = QG3_KVARN,
+        .type_size                = sizeof(block_q3_kvarn_k),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_q3_kvarn_k_ggml,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q3_kvarn_k_ref_ggml,
+    },
+    [GGML_TYPE_Q4_KVARN] = {
+        .type_name                = "q4_kvarn",
+        .blck_size                = QK4_KVARN,
+        .type_size                = sizeof(block_q4_kvarn),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_q4_kvarn,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q4_kvarn_ref,
+    },
+    [GGML_TYPE_Q4_KVARN_K] = {
+        .type_name                = "q4_kvarn_k",
+        .blck_size                = QG4_KVARN,
+        .type_size                = sizeof(block_q4_kvarn_k),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_q4_kvarn_k_ggml,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q4_kvarn_k_ref_ggml,
+    },
     [GGML_TYPE_Q4_0] = {
         .type_name                = "q4_0",
         .blck_size                = QK4_0,
@@ -8024,6 +8056,8 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_Q1_0:    result = quantize_q1_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q2_0:    result = quantize_q2_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q2_KVARN: result = quantize_q2_kvarn(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q3_KVARN: result = quantize_q3_kvarn(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q4_KVARN: result = quantize_q4_kvarn(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q4_0:    result = quantize_q4_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q4_1:    result = quantize_q4_1   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q5_0:    result = quantize_q5_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

@@ -77,6 +77,63 @@ static __device__ __forceinline__ void dequantize_q2_kvarn_k(const void * vx, co
     v.y = ((float)cy + z) * s;
 }
 
+// 3-bit code j: low 2 bits in ql (4/byte), high bit in qh (8/byte).
+static __device__ __forceinline__ int kvarn3_code(const uint8_t * ql, const uint8_t * qh, int j) {
+    const int lo = (ql[j >> 2] >> ((j & 3) * 2)) & 0x03;
+    const int hi = (qh[j >> 3] >> (j & 7)) & 0x01;
+    return lo | (hi << 2);
+}
+
+static __device__ __forceinline__ void dequantize_q3_kvarn(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q3_kvarn * x = (const block_q3_kvarn *) vx;
+
+    const float d     = __half2float(x[ib].d);
+    const float scale = __half2float(x[ib].s1) * __half2float(x[ib].s2);
+
+    v.x = ((float)kvarn3_code(x[ib].ql, x[ib].qh, iqs) + d) * scale;
+    v.y = ((float)kvarn3_code(x[ib].ql, x[ib].qh, iqs + QK3_KVARN/2) + d) * scale;
+}
+
+static __device__ __forceinline__ void dequantize_q3_kvarn_k(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q3_kvarn_k * x = (const block_q3_kvarn_k *) vx;
+
+    const float s = __half2float(x[ib].s);
+    const float z = __half2float(x[ib].z);
+
+    v.x = ((float)kvarn3_code(x[ib].ql, x[ib].qh, iqs) + z) * s;
+    v.y = ((float)kvarn3_code(x[ib].ql, x[ib].qh, iqs + QG3_KVARN/2) + z) * s;
+}
+
+static __device__ __forceinline__ void dequantize_q4_kvarn(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q4_kvarn * x = (const block_q4_kvarn *) vx;
+
+    const float d     = __half2float(x[ib].d);
+    const float scale = __half2float(x[ib].s1) * __half2float(x[ib].s2);
+
+    const int jx = iqs;
+    const int jy = iqs + QK4_KVARN/2;
+    const int cx = (x[ib].qs[jx >> 1] >> ((jx & 1) * 4)) & 0x0F;
+    const int cy = (x[ib].qs[jy >> 1] >> ((jy & 1) * 4)) & 0x0F;
+
+    v.x = ((float)cx + d) * scale;
+    v.y = ((float)cy + d) * scale;
+}
+
+static __device__ __forceinline__ void dequantize_q4_kvarn_k(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q4_kvarn_k * x = (const block_q4_kvarn_k *) vx;
+
+    const float s = __half2float(x[ib].s);
+    const float z = __half2float(x[ib].z);
+
+    const int jx = iqs;
+    const int jy = iqs + QG4_KVARN/2;
+    const int cx = (x[ib].qs[jx >> 1] >> ((jx & 1) * 4)) & 0x0F;
+    const int cy = (x[ib].qs[jy >> 1] >> ((jy & 1) * 4)) & 0x0F;
+
+    v.x = ((float)cx + z) * s;
+    v.y = ((float)cy + z) * s;
+}
+
 static __device__ __forceinline__ void dequantize_q4_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q4_0 * x = (const block_q4_0 *) vx;
 

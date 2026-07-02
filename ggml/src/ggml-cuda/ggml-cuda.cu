@@ -5025,7 +5025,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                                (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                                op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
                                op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL ||
-                               op->type == GGML_TYPE_Q2_KVARN) &&
+                               op->type == GGML_TYPE_Q2_KVARN || op->type == GGML_TYPE_Q3_KVARN || op->type == GGML_TYPE_Q4_KVARN) &&
                                op->src[0]->type == GGML_TYPE_F32
                            ) || (
                                op->type == GGML_TYPE_F16 && op->src[0]->type == GGML_TYPE_F16
@@ -5092,6 +5092,14 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return true;
                 }
                 if (src0_type == GGML_TYPE_Q2_KVARN && src1_type == GGML_TYPE_F32) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_F32 && (src1_type == GGML_TYPE_Q3_KVARN   || src1_type == GGML_TYPE_Q4_KVARN ||
+                                                   src1_type == GGML_TYPE_Q3_KVARN_K || src1_type == GGML_TYPE_Q4_KVARN_K)) {
+                    return true;
+                }
+                if (src1_type == GGML_TYPE_F32 && (src0_type == GGML_TYPE_Q3_KVARN   || src0_type == GGML_TYPE_Q4_KVARN ||
+                                                   src0_type == GGML_TYPE_Q3_KVARN_K || src0_type == GGML_TYPE_Q4_KVARN_K)) {
                     return true;
                 }
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_I32) {

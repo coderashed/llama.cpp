@@ -240,11 +240,11 @@ llama_kv_cache::llama_kv_cache(
         // The per-channel region tensors are only written/read by the env-gated
         // faithful path; without the gate they would consume VRAM (and shift
         // memory-fit layer placement) for nothing.
-        const bool is_kvarn = type_k == GGML_TYPE_Q2_KVARN
+        const bool is_kvarn = kvarn_is_cache_type(type_k)
             && kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
         // Item 07: analogous gate for the faithful V regions. Same two env vars as K
         // (design: kvarn_faithful_v_design.md) -- no new knobs.
-        const bool is_kvarn_v = type_v == GGML_TYPE_Q2_KVARN
+        const bool is_kvarn_v = kvarn_is_cache_type(type_v)
             && kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
 
         ggml_tensor * k = nullptr;
@@ -281,8 +281,8 @@ llama_kv_cache::llama_kv_cache(
             const int64_t n_head_kv  = hparams.n_head_kv(il);
 
             // BODY: [G tokens, channels, groups]. Writing group g is the
-            // [G, n_embd_k_gqa] view that the F32 -> Q2_KVARN_K cpy op produces.
-            k_body = ggml_new_tensor_3d(ctx, GGML_TYPE_Q2_KVARN_K, KVARN_GROUP_SIZE, n_embd_k_gqa, n_groups);
+            // [G, n_embd_k_gqa] view that the F32 -> per-channel-block cpy op produces.
+            k_body = ggml_new_tensor_3d(ctx, kvarn_body_type(type_k), KVARN_GROUP_SIZE, n_embd_k_gqa, n_groups);
             // RECENT: FP16, one G-sized rolling window of un-quantized tokens.
             k_recent = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_k_gqa, KVARN_GROUP_SIZE);
             // Persistent VarN scales, one per group (F32; negligible vs the 2-bit body).
@@ -306,7 +306,7 @@ llama_kv_cache::llama_kv_cache(
 
             // BODY: [channels, G tokens, groups], channel-fastest (matches v_cur/v's
             // natural layout -- unlike k_body, no axis transpose in the block format).
-            v_body = ggml_new_tensor_3d(ctx, GGML_TYPE_Q2_KVARN, n_embd_v_gqa, KVARN_GROUP_SIZE, n_groups);
+            v_body = ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, KVARN_GROUP_SIZE, n_groups);
             // RECENT: FP16, one G-sized rolling window of un-quantized tokens.
             v_recent = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_v_gqa, KVARN_GROUP_SIZE);
             // Persistent VarN scales, one per group -- same shapes as k_sr/k_sc.
@@ -1458,6 +1458,12 @@ ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q
     const int32_t ikv = map_layer_ids.at(il);
     const kv_layer & layer = layers[ikv];
     if (!layer.k_body) {
+        return nullptr;
+    }
+
+    // The fused kernel decodes block_q2_kvarn_k only; 3/4-bit bodies use the
+    // reconstruct path.
+    if (layer.k_body->type != GGML_TYPE_Q2_KVARN_K) {
         return nullptr;
     }
 

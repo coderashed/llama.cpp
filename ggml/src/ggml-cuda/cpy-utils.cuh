@@ -391,6 +391,161 @@ static __device__ void cpy_blck_f32_q2_kvarn_k(const char * cxi, char * cdsti) {
     quantize_f32_q2_kvarn_k_block((const float *)cxi, QG2_KVARN, (block_q2_kvarn_k *)cdsti);
 }
 
+// Shared scalar-scale search for the KVarN 3/4-bit siblings. Mirrors
+// kvarn_scalar_scale in ggml-quants.c: same iteration order, same strict-<
+// tie-break, so CPU and CUDA pick the same clip fraction bit-for-bit.
+static __device__ void kvarn_scalar_scale_cuda(const float * __restrict__ x, int n, float qmax,
+        float * __restrict__ lo_out, float * __restrict__ s_out) {
+    float min_val =  FLT_MAX;
+    float max_val = -FLT_MAX;
+    for (int j = 0; j < n; j++) {
+        const float v = x[j];
+        if (v < min_val) min_val = v;
+        if (v > max_val) max_val = v;
+    }
+
+    const float range = max_val - min_val;
+    if (range <= 0.0f) {
+        *lo_out = min_val;
+        *s_out  = 1.0f;
+        return;
+    }
+
+    const float F[5]   = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f};
+    const float center = 0.5f * (min_val + max_val);
+    float best_mse = FLT_MAX;
+    float best_f   = 1.0f;
+
+    for (int fi = 0; fi < 5; fi++) {
+        const float f     = F[fi];
+        const float half  = 0.5f * f * range;
+        const float lo_f  = center - half;
+        const float s_f   = f * range / qmax;
+        const float inv_f = 1.0f / s_f;
+
+        float mse = 0.0f;
+        for (int j = 0; j < n; j++) {
+            float val = (x[j] - lo_f) * inv_f;
+            if (val < 0.0f) val = 0.0f;
+            if (val > qmax) val = qmax;
+            const float q  = (float)(uint8_t)(val + 0.5f);
+            const float r  = q * s_f + lo_f;
+            const float d_ = x[j] - r;
+            mse += d_ * d_;
+        }
+        if (mse < best_mse) {
+            best_mse = mse;
+            best_f   = f;
+        }
+    }
+
+    const float half = 0.5f * best_f * range;
+    *lo_out = center - half;
+    *s_out  = best_f * range / qmax;
+}
+
+static __device__ void quantize_f32_q3_kvarn_block(const float * __restrict__ x, block_q3_kvarn * __restrict__ y) {
+    float lo, s1;
+    kvarn_scalar_scale_cuda(x, QK3_KVARN, 7.0f, &lo, &s1);
+    const float inv = 1.0f / s1;
+    const float zp  = lo * inv;
+
+    for (int j = 0; j < QK3_KVARN/4; j++) y->ql[j] = 0;
+    for (int j = 0; j < QK3_KVARN/8; j++) y->qh[j] = 0;
+
+    float sum_sq_orig = 0.0f;
+    float sum_sq_dq   = 0.0f;
+    for (int j = 0; j < QK3_KVARN; j++) {
+        float val = (x[j] - lo) * inv;
+        val = fminf(fmaxf(val, 0.0f), 7.0f);
+        const uint8_t q = (uint8_t)(val + 0.5f);
+        y->ql[j >> 2] |= (uint8_t)((q & 3) << ((j & 3) * 2));
+        y->qh[j >> 3] |= (uint8_t)((q >> 2) << (j & 7));
+        const float dq = ((float)q + zp) * s1;
+        sum_sq_dq   += dq * dq;
+        sum_sq_orig += x[j] * x[j];
+    }
+    const float norm_dq = sqrtf(sum_sq_dq);
+    y->d  = __float2half(zp);
+    y->s1 = __float2half(s1);
+    y->s2 = __float2half(norm_dq > 1e-10f ? sqrtf(sum_sq_orig) / norm_dq : 1.0f);
+}
+
+static __device__ void quantize_f32_q4_kvarn_block(const float * __restrict__ x, block_q4_kvarn * __restrict__ y) {
+    float lo, s1;
+    kvarn_scalar_scale_cuda(x, QK4_KVARN, 15.0f, &lo, &s1);
+    const float inv = 1.0f / s1;
+    const float zp  = lo * inv;
+
+    for (int j = 0; j < QK4_KVARN/2; j++) y->qs[j] = 0;
+
+    float sum_sq_orig = 0.0f;
+    float sum_sq_dq   = 0.0f;
+    for (int j = 0; j < QK4_KVARN; j++) {
+        float val = (x[j] - lo) * inv;
+        val = fminf(fmaxf(val, 0.0f), 15.0f);
+        const uint8_t q = (uint8_t)(val + 0.5f);
+        y->qs[j >> 1] |= (uint8_t)(q << ((j & 1) * 4));
+        const float dq = ((float)q + zp) * s1;
+        sum_sq_dq   += dq * dq;
+        sum_sq_orig += x[j] * x[j];
+    }
+    const float norm_dq = sqrtf(sum_sq_dq);
+    y->d  = __float2half(zp);
+    y->s1 = __float2half(s1);
+    y->s2 = __float2half(norm_dq > 1e-10f ? sqrtf(sum_sq_orig) / norm_dq : 1.0f);
+}
+
+static __device__ void quantize_f32_q3_kvarn_k_block(const float * __restrict__ x, int n_tok, block_q3_kvarn_k * __restrict__ y) {
+    float lo, s;
+    kvarn_scalar_scale_cuda(x, n_tok, 7.0f, &lo, &s);
+    const float inv = 1.0f / s;
+
+    y->s = __float2half(s);
+    y->z = __float2half(lo * inv);
+
+    for (int j = 0; j < QG3_KVARN/4; j++) y->ql[j] = 0;
+    for (int j = 0; j < QG3_KVARN/8; j++) y->qh[j] = 0;
+    for (int j = 0; j < n_tok; j++) {
+        float val = fminf(fmaxf((x[j] - lo) * inv, 0.0f), 7.0f);
+        const uint8_t q = (uint8_t)(val + 0.5f);
+        y->ql[j >> 2] |= (uint8_t)((q & 3) << ((j & 3) * 2));
+        y->qh[j >> 3] |= (uint8_t)((q >> 2) << (j & 7));
+    }
+}
+
+static __device__ void quantize_f32_q4_kvarn_k_block(const float * __restrict__ x, int n_tok, block_q4_kvarn_k * __restrict__ y) {
+    float lo, s;
+    kvarn_scalar_scale_cuda(x, n_tok, 15.0f, &lo, &s);
+    const float inv = 1.0f / s;
+
+    y->s = __float2half(s);
+    y->z = __float2half(lo * inv);
+
+    for (int j = 0; j < QG4_KVARN/2; j++) y->qs[j] = 0;
+    for (int j = 0; j < n_tok; j++) {
+        float val = fminf(fmaxf((x[j] - lo) * inv, 0.0f), 15.0f);
+        const uint8_t q = (uint8_t)(val + 0.5f);
+        y->qs[j >> 1] |= (uint8_t)(q << ((j & 1) * 4));
+    }
+}
+
+static __device__ void cpy_blck_f32_q3_kvarn(const char * cxi, char * cdsti) {
+    quantize_f32_q3_kvarn_block((const float *)cxi, (block_q3_kvarn *)cdsti);
+}
+
+static __device__ void cpy_blck_f32_q4_kvarn(const char * cxi, char * cdsti) {
+    quantize_f32_q4_kvarn_block((const float *)cxi, (block_q4_kvarn *)cdsti);
+}
+
+static __device__ void cpy_blck_f32_q3_kvarn_k(const char * cxi, char * cdsti) {
+    quantize_f32_q3_kvarn_k_block((const float *)cxi, QG3_KVARN, (block_q3_kvarn_k *)cdsti);
+}
+
+static __device__ void cpy_blck_f32_q4_kvarn_k(const char * cxi, char * cdsti) {
+    quantize_f32_q4_kvarn_k_block((const float *)cxi, QG4_KVARN, (block_q4_kvarn_k *)cdsti);
+}
+
 template<typename src_t, typename dst_t>
 static __device__ void cpy_1_scalar(const char * cxi, char * cdsti) {
     *(dst_t *) cdsti = ggml_cuda_cast<dst_t>(*(const src_t *) cxi);
