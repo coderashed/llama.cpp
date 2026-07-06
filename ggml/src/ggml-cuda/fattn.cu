@@ -327,6 +327,8 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q2_KVARN,  GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q2_KVARN,  GGML_TYPE_Q2_KVARN)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,       GGML_TYPE_Q2_KVARN)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q3_KVARN,  GGML_TYPE_Q3_KVARN)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_KVARN,  GGML_TYPE_Q4_KVARN)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
     GGML_ABORT("fatal error");
@@ -354,6 +356,8 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q2_KVARN:
+        case GGML_TYPE_Q3_KVARN:
+        case GGML_TYPE_Q4_KVARN:
         case GGML_TYPE_BF16:
             return true;
         default:
@@ -447,8 +451,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
     if (K->type != V->type) {
-        const bool is_q2_kvarn_mix = K->type == GGML_TYPE_Q2_KVARN || V->type == GGML_TYPE_Q2_KVARN;
-        if (!is_q2_kvarn_mix) {
+        // Mixed K/V vec instances exist only for these q2_kvarn pairings
+        // (q3/q4_kvarn are same-type only); anything else has no kernel.
+        const bool kvarn_mix_ok =
+            (K->type == GGML_TYPE_Q2_KVARN &&
+                (V->type == GGML_TYPE_F16 || V->type == GGML_TYPE_Q4_0 || V->type == GGML_TYPE_Q8_0)) ||
+            (V->type == GGML_TYPE_Q2_KVARN && K->type == GGML_TYPE_F16);
+        if (!kvarn_mix_ok) {
             return BEST_FATTN_KERNEL_NONE;
         }
     }
@@ -466,18 +475,22 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0;
 
-    // q2_kvarn has no non-contiguous f16 dequantizer: ggml_get_to_fp16_nc_cuda
-    // returns nullptr for it. When K or V is a NON-CONTIGUOUS q2_kvarn view
-    // and a non-VEC kernel (TILE/WMMA/MMA/MFMA) is chosen, launch_fattn takes
-    // the _nc branch and dereferences that NULL -> SIGSEGV.
-    // VEC never converts q2_kvarn (need_f16_K/V stay false for it) and handles
-    // any Q->ne[1], so it is the safe choice. Route non-contiguous q2_kvarn K/V
-    // to VEC, or to NONE (CPU fallback) when the vector kernel does not apply
-    // for this shape. Contiguous q2_kvarn is intentionally NOT guarded here: its
-    // contiguous f16 converter exists, so TILE/MMA are safe and faster -- it
-    // falls through.
-    if ((K->type == GGML_TYPE_Q2_KVARN && !ggml_is_contiguously_allocated(K)) ||
-            (V->type == GGML_TYPE_Q2_KVARN && !ggml_is_contiguously_allocated(V))) {
+    // The kvarn per-token types have no non-contiguous f16 dequantizer:
+    // ggml_get_to_fp16_nc_cuda returns nullptr for them. When K or V is a
+    // NON-CONTIGUOUS kvarn view and a non-VEC kernel (TILE/WMMA/MMA/MFMA) is
+    // chosen, launch_fattn takes the _nc branch and dereferences that NULL
+    // -> SIGSEGV.
+    // VEC never converts kvarn types (need_f16_K/V stay false for them) and
+    // handles any Q->ne[1], so it is the safe choice. Route non-contiguous
+    // kvarn K/V to VEC, or to NONE (CPU fallback) when the vector kernel does
+    // not apply for this shape. Contiguous kvarn is intentionally NOT guarded
+    // here: its contiguous f16 converter exists, so TILE/MMA are safe and
+    // faster -- it falls through.
+    const auto is_kvarn_pt = [](ggml_type t) {
+        return t == GGML_TYPE_Q2_KVARN || t == GGML_TYPE_Q3_KVARN || t == GGML_TYPE_Q4_KVARN;
+    };
+    if ((is_kvarn_pt(K->type) && !ggml_is_contiguously_allocated(K)) ||
+            (is_kvarn_pt(V->type) && !ggml_is_contiguously_allocated(V))) {
         return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 

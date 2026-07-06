@@ -30,6 +30,10 @@ KL-divergence vs f16 (16 chunks, only the KV type varies):
 
 ## Environment variables
 
+All kvarn cache types (`q2_kvarn`, `q3_kvarn`, `q4_kvarn`) default to the
+per-token path with no environment variables; the gates below opt any of them
+into the faithful path.
+
 All gates parse their value: **unset or `0` means off, any nonzero value means
 on** (same convention as `LLAMA_GRAPH_REUSE_DISABLE`).
 
@@ -40,8 +44,8 @@ on** (same convention as `LLAMA_GRAPH_REUSE_DISABLE`).
 | `LLAMA_KVARN_FUSED_FA`         | Uses the fused per-channel attention op (`GGML_OP_KVARN_FA`) that reads the 2-bit per-channel blocks directly inside the kernel, instead of reconstructing K to F16 first. Requires both gates above; engages for group-aligned prefill only and falls back to reconstruction otherwise. The current kernel is a correctness prototype and is slower than reconstruction at long-prompt prefill - leave it unset unless you are working on the kernel. |
 | `LLAMA_KVARN_DEBUG`            | Traces the per-channel write path (head position, batch size, contiguity) at layer 0. |
 
-When every variable is unset (or `0`), behavior and memory use are identical to
-the default per-token `q2_kvarn` path.
+When every variable is unset (or `0`), behavior and memory use are identical
+to the default per-token path for all three types.
 
 ## Usage
 
@@ -65,21 +69,27 @@ LLAMA_KVARN_PERCHANNEL_READ=1 LLAMA_KVARN_VARN=1 \
 With both gates set, `-ctv q2_kvarn` additionally routes V through the same
 three-region scheme (VarN-normalized group tiles, per-token quantization,
 reconstruction on read). The 3-bit and 4-bit siblings `q3_kvarn` and `q4_kvarn`
-are accepted by both `-ctk` and `-ctv`; they exist only on the faithful path
-and refuse to start without the two gates. The fused attention op stays 2-bit
-only; 3/4-bit K always uses reconstruction.
+follow the same rule as `q2_kvarn`: per-token by default (dedicated
+flash-attention kernels, full speed - see [kvarn.md](kvarn.md)), faithful when
+the gates are set. The fused attention op stays 2-bit only; faithful 3/4-bit K
+always uses reconstruction.
 
-KL divergence vs f16 (Qwen3.6-35B-A3B UD-Q6_K, wikitext-2, 16 chunks):
+KL divergence vs f16 (Qwen3.6-35B-A3B UD-Q6_K, wikitext-2, 16 chunks), faithful
+gates on unless marked per-token:
 
 | `-ctk` / `-ctv`       | mean KLD | 99.9% KLD | PPL ratio |
 |-----------------------|----------|-----------|-----------|
 | q2_kvarn / q2_kvarn   | 0.0575   | 1.04      | 1.047     |
 | q2_kvarn / q4_kvarn   | 0.0259   | 0.76      | 1.026     |
 | q3_kvarn / q3_kvarn   | 0.0188   | 0.28      | 1.010     |
+| q3/q3 PER-TOKEN       | 0.0202   | 0.48      | 1.010     |
 | q4_kvarn / q4_kvarn   | 0.0092   | 0.23      | 1.006     |
 
-`q3_kvarn` for both K and V is the recommended starting point: under 1% PPL
-cost at just over 3 bits per element.
+At 3-bit the faithful machinery buys almost nothing over per-token (0.0188 vs
+0.0202 mean, identical PPL ratio) while costing roughly 2x prefill and 4x
+decode; the per-token default is the recommended configuration. The faithful
+path remains the quality reference and the only 2-bit-K option that beats
+per-token materially.
 
 ## Performance and limitations
 

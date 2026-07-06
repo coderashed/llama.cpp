@@ -312,6 +312,11 @@ private:
     bool attn_rot_k = false;
     bool attn_rot_v = false;
 
+    // env: LLAMA_KVARN_PERCHANNEL_READ / LLAMA_KVARN_VARN
+    // opt every kvarn cache type into the faithful path (per-token is the default)
+    bool kvarn_perchannel_read = false;
+    bool kvarn_varn            = false;
+
     // if all layers participating in the cache have constant head size, the value is stored here
     // otherwise the value is -1
     int32_t n_embd_head_k_all = 0;

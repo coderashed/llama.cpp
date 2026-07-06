@@ -62,9 +62,30 @@ symmetrically to both.
 | q2_kvarn  | f16       |
 | q2_kvarn  | q2_kvarn  |
 | f16       | q2_kvarn  |
+| q3_kvarn  | q3_kvarn  |
+| q4_kvarn  | q4_kvarn  |
 
 Other combinations fall back to the generic dispatch and may abort; stick to the
 pairs above.
+
+## 3-bit and 4-bit siblings (q3_kvarn, q4_kvarn)
+
+`q3_kvarn` (~3.4 bits/element) and `q4_kvarn` (~4.4 bits/element) are sibling
+types with the same block layout (128-element blocks, d/s1/s2 scales) at higher
+code widths. Like `q2_kvarn` they are per-token by default, read directly by
+the flash-attention kernels at full speed, and require `-fa on`. Same-type K/V
+pairing only (see the table above).
+
+KL divergence vs an f16 cache (Qwen3.6-35B-A3B UD-Q6_K, wikitext-2, 16 chunks):
+
+| -ctk / -ctv           | mean KLD | 99.9% KLD | PPL ratio |
+|-----------------------|----------|-----------|-----------|
+| q2_kvarn / q2_kvarn   | 0.0647   | 1.21      |           |
+| q3_kvarn / q3_kvarn   | 0.0202   | 0.48      | 1.010     |
+
+`q3_kvarn / q3_kvarn` is the recommended configuration: under 1% PPL cost and
+~4.7x smaller than f16, with prefill and decode at f16-cache speed (measured
+on 2x MI50: identical prefill throughput to f16 and q2_kvarn caches).
 
 ## How it works (brief)
 

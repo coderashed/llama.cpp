@@ -104,6 +104,9 @@ llama_kv_cache::llama_kv_cache(
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
+    kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
+    kvarn_varn            = kvarn_env_enabled("LLAMA_KVARN_VARN");
+
     const uint32_t n_layer = hparams.n_layer_all;
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
@@ -237,15 +240,11 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        // The per-channel region tensors are only written/read by the env-gated
-        // faithful path; without the gate they would consume VRAM (and shift
-        // memory-fit layer placement) for nothing.
-        const bool is_kvarn = kvarn_is_cache_type(type_k)
-            && kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
-        // Item 07: analogous gate for the faithful V regions. Same two env vars as K
-        // (design: kvarn_faithful_v_design.md) -- no new knobs.
-        const bool is_kvarn_v = kvarn_is_cache_type(type_v)
-            && kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
+        // The per-channel region tensors are only written/read by the faithful
+        // path; otherwise they would consume VRAM (and shift memory-fit layer
+        // placement) for nothing.
+        const bool is_kvarn   = kvarn_is_cache_type(type_k) && kvarn_perchannel_read;
+        const bool is_kvarn_v = kvarn_is_cache_type(type_v) && kvarn_perchannel_read;
 
         ggml_tensor * k = nullptr;
         ggml_tensor * v = nullptr;
@@ -1344,11 +1343,9 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
     const uint32_t ns = sinfo.s1 - sinfo.s0 + 1;
 
     // Phase B (KVARN_FAITHFUL/03): read K from the per-channel body instead of the
-    // per-token k. Gated by env so the same build A/Bs per-token (baseline) vs
-    // per-channel on the PPL harness. Reconstruction (design 5.2 prototype tier):
+    // per-token k. Reconstruction (design 5.2 prototype tier):
     // dequant k_body -> permute channel-major to standard [channel, position] -> F16.
     const kv_layer & layer = layers[ikv];
-    static const bool kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
     if (kvarn_perchannel_read && layer.k_body) {
         GGML_ASSERT(ns == 1); // single-stream (multi-stream is a later phase)
         const int64_t C        = n_embd_k_gqa;
@@ -1367,7 +1364,6 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
         const int64_t L  = (int64_t) sinfo.head() + (int64_t) sinfo.size();
         const int64_t ng = L / G;           // complete (flushed) body groups
         const int64_t rv = L - ng*G;        // valid recent tail (< G, in k_recent FP16)
-        static const bool kvarn_varn = kvarn_env_enabled("LLAMA_KVARN_VARN");
 
         ggml_tensor * Kbody = nullptr;      // [C, ng*G] F16
         if (ng > 0) {
@@ -1438,12 +1434,10 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
 
 ggml_tensor * llama_kv_cache::build_kvarn_fa(ggml_context * ctx, ggml_tensor * q, ggml_tensor * v,
         ggml_tensor * mask, float scale, int32_t il, const slot_info & sinfo) const {
-    // Opt-in on top of the per-channel read + VarN gates (cpy_k_regions writes
-    // k_body/k_sr/k_sc only when those are set). Feeds ggml_kvarn_fa (GPU-only).
-    static const bool enabled = kvarn_env_enabled("LLAMA_KVARN_FUSED_FA")
-        && kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ")
-        && kvarn_env_enabled("LLAMA_KVARN_VARN");
-    if (!enabled) {
+    // Opt-in on top of the per-channel read + VarN path (cpy_k_regions writes
+    // k_body/k_sr/k_sc only when it is active). Feeds ggml_kvarn_fa (GPU-only).
+    static const bool fused_fa = kvarn_env_enabled("LLAMA_KVARN_FUSED_FA");
+    if (!fused_fa || !kvarn_perchannel_read || !kvarn_varn) {
         return nullptr;
     }
 
@@ -1517,7 +1511,6 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
     // (v_body -> F32) needs NO permute first: v_body is already channel-fastest
     // (unlike k_body, whose channel-major block format needs a post-dequant permute).
     const kv_layer & layer = layers[ikv];
-    static const bool kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
     if (kvarn_perchannel_read && layer.v_body) {
         GGML_ASSERT(ns == 1); // single-stream (multi-stream is a later phase)
         const int64_t C        = n_embd_v_gqa;
@@ -1527,7 +1520,6 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
         const int64_t L  = (int64_t) sinfo.head() + (int64_t) sinfo.size();
         const int64_t ng = L / G;
         const int64_t rv = L - ng*G;
-        static const bool kvarn_varn = kvarn_env_enabled("LLAMA_KVARN_VARN");
 
         ggml_tensor * Vbody = nullptr; // [C, ng*G] F32
         if (ng > 0) {
@@ -1656,9 +1648,8 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
         return roots;
     }
 
-    // The regions are read only by the env-gated faithful path (get_k reconstruct /
+    // The regions are read only by the faithful path (get_k reconstruct /
     // build_kvarn_fa); skip the write work entirely when it is off.
-    static const bool kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
     if (!kvarn_perchannel_read) {
         return roots;
     }
@@ -1683,10 +1674,6 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
 
     // Merge (head-dim, head) into the channel axis: k_cur -> [n_embd_gqa, n_tokens].
     ggml_tensor * k2d = ggml_view_2d(ctx, k_cur, n_embd_gqa, n_tokens, k_cur->nb[2], 0);
-
-    // VarN (item 04) runs only when the per-channel read is enabled (it needs the
-    // scales at read); otherwise quantize the raw rotated tile as before.
-    static const bool kvarn_varn = kvarn_env_enabled("LLAMA_KVARN_VARN");
 
     // Flush a complete group tile ([G, n_embd_gqa] F32, token-major rows) into k_body
     // at absolute group gg: (VarN then) quantize per-channel, and persist S_r/S_c.
@@ -1801,7 +1788,6 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_v_regions(ggml_context * ctx, ggm
         return roots;
     }
 
-    static const bool kvarn_perchannel_read = kvarn_env_enabled("LLAMA_KVARN_PERCHANNEL_READ");
     if (!kvarn_perchannel_read) {
         return roots;
     }
@@ -1820,8 +1806,6 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_v_regions(ggml_context * ctx, ggm
     // Merge (head-dim, head) into the channel axis: v_cur -> [n_embd_gqa, n_tokens],
     // channel-fastest (v's natural layout; unlike K, no transpose needed here).
     ggml_tensor * v2d = ggml_view_2d(ctx, v_cur, n_embd_gqa, n_tokens, v_cur->nb[2], 0);
-
-    static const bool kvarn_varn = kvarn_env_enabled("LLAMA_KVARN_VARN");
 
     // Flush a complete group tile ([n_embd_gqa, G] F32, channel-fastest) into v_body
     // at absolute group gg. Unlike K (whose channel-major block format happens to

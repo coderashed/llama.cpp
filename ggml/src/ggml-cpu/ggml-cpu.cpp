@@ -474,6 +474,17 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
             return ggml_is_contiguous(op->src[0]);
         case GGML_OP_KVARN_FA:
             return false; // CUDA/HIP only (reads channel-major block_q2_kvarn_k)
+        case GGML_OP_FLASH_ATTN_EXT: {
+            // The kvarn per-token K/V types are readable only by the CUDA/HIP
+            // fattn-vec kernels; the CPU forward has no vec_dot for them and
+            // would null-deref. Returning false forces GPU placement.
+            const auto is_kvarn_pt = [](const struct ggml_tensor * t) {
+                return t && (t->type == GGML_TYPE_Q2_KVARN ||
+                             t->type == GGML_TYPE_Q3_KVARN ||
+                             t->type == GGML_TYPE_Q4_KVARN);
+            };
+            return !is_kvarn_pt(op->src[1]) && !is_kvarn_pt(op->src[2]);
+        }
         case GGML_OP_KVARN_VARN:
             // Cede to the GPU ONLY the tile shapes its kernel accepts (head_dim,n_tok <= 256;
             // mirror ggml-cuda supports_op / VARN_MAXDIM). Returning false there forces GPU

@@ -157,24 +157,6 @@ llama_context::llama_context(
         cparams.kvarn_varn_iterations = 0;
     }
 
-    // The 3/4-bit KVarN types are readable only through the faithful reconstruct
-    // path (no attention kernels exist for their per-token blocks); without the
-    // gates the read would fall through to unsupported kernels. Fail early.
-    {
-        const auto is_multibit = [](ggml_type t) {
-            return t == GGML_TYPE_Q3_KVARN || t == GGML_TYPE_Q4_KVARN;
-        };
-        const auto env_on = [](const char * name) {
-            const char * v = getenv(name);
-            return v && atoi(v) != 0;
-        };
-        if ((is_multibit(params.type_k) || is_multibit(params.type_v)) &&
-                !(env_on("LLAMA_KVARN_PERCHANNEL_READ") && env_on("LLAMA_KVARN_VARN"))) {
-            throw std::runtime_error(
-                "q3_kvarn/q4_kvarn KV cache types require LLAMA_KVARN_PERCHANNEL_READ=1 and LLAMA_KVARN_VARN=1");
-        }
-    }
-
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
         if (params.ctx_other == nullptr) {

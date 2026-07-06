@@ -503,6 +503,12 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "q2_kvarn") {
         return GGML_TYPE_Q2_KVARN;
     }
+    if (s == "q3_kvarn") {
+        return GGML_TYPE_Q3_KVARN;
+    }
+    if (s == "q4_kvarn") {
+        return GGML_TYPE_Q4_KVARN;
+    }
 
     return GGML_TYPE_COUNT;
 }
