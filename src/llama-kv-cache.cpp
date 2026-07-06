@@ -1747,12 +1747,39 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_k_regions(ggml_context * ctx, ggm
         }
     }
 
+    // All complete middle groups go through ONE op chain: one cont, one VarN
+    // launch (grid = n_head*n_mid tiles), one cpy per output. Per-group ops
+    // starve the GPU: grid = n_head (2 on GQA models) blocks per launch, ~24.5k
+    // launches per 32k prefill = the measured 3.1x gates-on prefill cost.
     const int64_t base_group_mid = (p0 + n_lead) / G;
-    for (int64_t g = 0; g < n_mid; ++g) {
-        ggml_tensor * tile = ggml_view_2d(ctx, k2d, n_embd_gqa, G, k2d->nb[1], tok*k2d->nb[1]);
-        ggml_tensor * tile_cm = ggml_cont(ctx, ggml_transpose(ctx, tile)); // [G, n_embd_gqa] F32
-        flush_group(tile_cm, base_group_mid + g);
-        tok += G;
+    if (n_mid > 0) {
+        ggml_tensor * mid3 = ggml_view_3d(ctx, k2d, n_embd_gqa, G, n_mid,
+                k2d->nb[1], G*k2d->nb[1], tok*k2d->nb[1]);
+        ggml_tensor * tiles = ggml_cont(ctx, ggml_permute(ctx, mid3, 1, 0, 2, 3)); // [G, C, n_mid] F32
+        ggml_tensor * body_dst = ggml_view_3d(ctx, layer.k_body, G, n_embd_gqa, n_mid,
+                layer.k_body->nb[1], layer.k_body->nb[2], base_group_mid*layer.k_body->nb[2]);
+        ggml_tensor * to_quant = tiles;
+        if (kvarn_varn) {
+            const int64_t nt = n_embd_gqa*G*n_mid; // T_norm elements across all tiles
+            ggml_tensor * tile3d = ggml_reshape_3d(ctx, tiles, G, n_embd_head, n_head*n_mid);
+            ggml_tensor * op = ggml_kvarn_varn(ctx, tile3d);
+            to_quant = ggml_view_3d(ctx, op, G, n_embd_gqa, n_mid,
+                    G*sizeof(float), G*n_embd_gqa*sizeof(float), 0); // T_norm [G, C, n_mid]
+            ggml_tensor * sr = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_embd_gqa*n_mid, nt*sizeof(float)),
+                    n_embd_head, n_head, n_mid);
+            ggml_tensor * sc = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_head*G*n_mid, (nt + n_embd_gqa*n_mid)*sizeof(float)),
+                    G, n_head, n_mid);
+            ggml_tensor * sr_dst = ggml_view_3d(ctx, layer.k_sr, n_embd_head, n_head, n_mid,
+                    layer.k_sr->nb[1], layer.k_sr->nb[2], base_group_mid*layer.k_sr->nb[2]);
+            ggml_tensor * sc_dst = ggml_view_3d(ctx, layer.k_sc, G, n_head, n_mid,
+                    layer.k_sc->nb[1], layer.k_sc->nb[2], base_group_mid*layer.k_sc->nb[2]);
+            roots.push_back(ggml_cpy(ctx, sr, sr_dst));
+            roots.push_back(ggml_cpy(ctx, sc, sc_dst));
+        }
+        roots.push_back(ggml_cpy(ctx, to_quant, body_dst)); // F32 -> Q2_KVARN_K
+        tok += n_mid*G;
     }
 
     if (n_trail > 0) {
@@ -1853,11 +1880,39 @@ std::vector<ggml_tensor *> llama_kv_cache::cpy_v_regions(ggml_context * ctx, ggm
         }
     }
 
+    // Batched middle groups: one op chain for all complete groups, mirroring
+    // cpy_k_regions (V pays the extra transpose pair around VarN, but now once
+    // per ubatch instead of once per group).
     const int64_t base_group_mid = (p0 + n_lead) / G;
-    for (int64_t g = 0; g < n_mid; ++g) {
-        ggml_tensor * tile_ch = ggml_view_2d(ctx, v2d, n_embd_gqa, G, v2d->nb[1], tok*v2d->nb[1]);
-        flush_group_v(tile_ch, base_group_mid + g);
-        tok += G;
+    if (n_mid > 0) {
+        ggml_tensor * mid3 = ggml_view_3d(ctx, v2d, n_embd_gqa, G, n_mid,
+                v2d->nb[1], G*v2d->nb[1], tok*v2d->nb[1]); // [C, G, n_mid], channel-fastest
+        ggml_tensor * body_dst = ggml_view_3d(ctx, layer.v_body, n_embd_gqa, G, n_mid,
+                layer.v_body->nb[1], layer.v_body->nb[2], base_group_mid*layer.v_body->nb[2]);
+        ggml_tensor * to_quant = mid3;
+        if (kvarn_varn) {
+            const int64_t nt = n_embd_gqa*G*n_mid;
+            ggml_tensor * tiles = ggml_cont(ctx, ggml_permute(ctx, mid3, 1, 0, 2, 3)); // [G, C, n_mid]
+            ggml_tensor * tile3d = ggml_reshape_3d(ctx, tiles, G, n_embd_head, n_head*n_mid);
+            ggml_tensor * op = ggml_kvarn_varn(ctx, tile3d);
+            ggml_tensor * Tn = ggml_view_3d(ctx, op, G, n_embd_gqa, n_mid,
+                    G*sizeof(float), G*n_embd_gqa*sizeof(float), 0); // [G, C, n_mid]
+            to_quant = ggml_cont(ctx, ggml_permute(ctx, Tn, 1, 0, 2, 3)); // [C, G, n_mid]
+            ggml_tensor * sr = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_embd_gqa*n_mid, nt*sizeof(float)),
+                    n_embd_head, n_head, n_mid);
+            ggml_tensor * sc = ggml_reshape_3d(ctx,
+                    ggml_view_1d(ctx, op, n_head*G*n_mid, (nt + n_embd_gqa*n_mid)*sizeof(float)),
+                    G, n_head, n_mid);
+            ggml_tensor * sr_dst = ggml_view_3d(ctx, layer.v_sr, n_embd_head, n_head, n_mid,
+                    layer.v_sr->nb[1], layer.v_sr->nb[2], base_group_mid*layer.v_sr->nb[2]);
+            ggml_tensor * sc_dst = ggml_view_3d(ctx, layer.v_sc, G, n_head, n_mid,
+                    layer.v_sc->nb[1], layer.v_sc->nb[2], base_group_mid*layer.v_sc->nb[2]);
+            roots.push_back(ggml_cpy(ctx, sr, sr_dst));
+            roots.push_back(ggml_cpy(ctx, sc, sc_dst));
+        }
+        roots.push_back(ggml_cpy(ctx, to_quant, body_dst)); // F32 -> Q2_KVARN
+        tok += n_mid*G;
     }
 
     if (n_trail > 0) {
