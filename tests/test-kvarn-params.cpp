@@ -3,7 +3,6 @@
 // All tests will FAIL at compile time because the fields do not exist yet.
 
 #include "llama.h"
-#include "get-model.h"
 
 #undef NDEBUG
 #include <assert.h>
