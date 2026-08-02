@@ -1253,8 +1253,13 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
     LLAMA_LOG_INFO("%s: creating DSV4 lightning-indexer KV cache, size = %u cells\n",
             __func__, dsv4_comp_size(kv_size, DSV4_CSA_RATIO));
 
+    // the indexer scores via a plain mul_mat against this cache (not flash attention),
+    // so it must stay in a type the mat-vec path supports; kvarn has no mmvq kernel
+    const ggml_type type_k_lid = kvarn_is_cache_type(type_k) ? GGML_TYPE_F16 : type_k;
+    const ggml_type type_v_lid = kvarn_is_cache_type(type_v) ? GGML_TYPE_F16 : type_v;
+
     kv_lid = std::make_unique<llama_kv_cache>(
-            model, hparams_lid, type_k, type_v,
+            model, hparams_lid, type_k_lid, type_v_lid,
             v_trans, offload, unified_compressed, GGML_PAD(dsv4_comp_size(kv_size, DSV4_CSA_RATIO), 256u), n_seq_max, n_pad,
             0, LLAMA_SWA_TYPE_NONE, nullptr, filter_csa, nullptr, nullptr);
 
