@@ -807,7 +807,16 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
     io.write(&cell_count, sizeof(cell_count));
 
     state_write_meta(io, cell_ranges, seq_id);
-    state_write_data(io, cell_ranges_data);
+
+    // KVSNAP: persist the current rollback-plane index so read can restore snapshots
+    uint32_t rs_idx_save = 0;
+    if (n_rs_seq != 0 && seq_id >= 0 && (size_t) seq_id < rs_idx.size()) {
+        rs_idx_save = rs_idx[seq_id];
+    }
+    io.write(&rs_idx_save, sizeof(rs_idx_save));
+
+    (void) cell_ranges_data;
+    state_write_data(io, cell_ranges); // KVSNAP: base ranges; data loops all planes
 }
 
 void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
@@ -819,6 +828,9 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
     bool res = true;
 
     res = res && state_read_meta(io, cell_count, seq_id);
+
+    uint32_t rs_idx_load = 0; // KVSNAP
+    io.read(&rs_idx_load, sizeof(rs_idx_load));
 
     try {
         res = res && state_read_data(io, cell_count);
@@ -839,7 +851,7 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
         if (seq_id == -1) {
             std::fill(rs_idx.begin(), rs_idx.end(), 0);
         } else {
-            set_rs_idx(seq_id, 0);
+            set_rs_idx(seq_id, rs_idx_load); // KVSNAP: restore saved rollback index
         }
     }
 }
@@ -886,10 +898,12 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
 
         // Write each logical cell row range. With pending recurrent rollback,
         // the logical current state may live in a rollback snapshot plane.
-        for (const auto & range : cell_ranges) {
-            const size_t range_size = range.second - range.first;
-            const size_t buf_size = range_size * r_size_row;
-            io.write_tensor(r_l[il], range.first * r_size_row, buf_size);
+        for (uint32_t kp = 0; kp <= n_rs_seq; ++kp) { // KVSNAP: write all rollback planes
+            for (const auto & range : cell_ranges) {
+                const size_t range_size = range.second - range.first;
+                const size_t buf_size = range_size * r_size_row;
+                io.write_tensor(r_l[il], (range.first + kp * size) * r_size_row, buf_size);
+            }
         }
     }
 
@@ -908,10 +922,12 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
 
             // Write each logical cell row range. With pending recurrent rollback,
             // the logical current state may live in a rollback snapshot plane.
-            for (const auto & range : cell_ranges) {
-                const size_t range_size = range.second - range.first;
-                const size_t buf_size = range_size * s_size_row;
-                io.write_tensor(s_l[il], range.first * s_size_row, buf_size);
+            for (uint32_t kp = 0; kp <= n_rs_seq; ++kp) { // KVSNAP: write all rollback planes
+                for (const auto & range : cell_ranges) {
+                    const size_t range_size = range.second - range.first;
+                    const size_t buf_size = range_size * s_size_row;
+                    io.write_tensor(s_l[il], (range.first + kp * size) * s_size_row, buf_size);
+                }
             }
         }
     } else {
@@ -1086,8 +1102,9 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
         }
 
         if (cell_count) {
-            // Read and set the keys for the whole cell range
-            io.read_tensor(r_l[il], head * r_size_row, cell_count * r_size_row);
+            for (uint32_t kp = 0; kp <= n_rs_seq; ++kp) { // KVSNAP: read all rollback planes
+                io.read_tensor(r_l[il], (head + kp * size) * r_size_row, cell_count * r_size_row);
+            }
         }
     }
 
@@ -1116,8 +1133,9 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
             }
 
             if (cell_count) {
-                // Read and set the values for the whole cell range
-                io.read_tensor(s_l[il], head * s_size_row, cell_count * s_size_row);
+                for (uint32_t kp = 0; kp <= n_rs_seq; ++kp) { // KVSNAP: read all rollback planes
+                    io.read_tensor(s_l[il], (head + kp * size) * s_size_row, cell_count * s_size_row);
+                }
             }
         }
     } else {

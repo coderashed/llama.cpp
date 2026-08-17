@@ -2476,6 +2476,17 @@ private:
                         break;
                     }
 
+                    // KVFIX-DFT: persist the draft (speculative) context state so a restored
+                    // slot has a consistent draft KV; else seq_rm on the draft aborts.
+                    if (ctx_dft) {
+                        const size_t szd = llama_state_seq_get_size_ext(ctx_dft, slot->id, LLAMA_STATE_SEQ_FLAGS_NONE);
+                        std::vector<uint8_t> bufd(szd);
+                        llama_state_seq_get_data_ext(ctx_dft, bufd.data(), szd, slot->id, LLAMA_STATE_SEQ_FLAGS_NONE);
+                        const std::string dftpath = filepath + ".dft";
+                        FILE * fdft = fopen(dftpath.c_str(), "wb");
+                        if (fdft) { fwrite(bufd.data(), 1, szd, fdft); fclose(fdft); }
+                    }
+
                     const int64_t t_end = ggml_time_us();
                     const double t_save_ms = (t_end - t_start) / 1000.0;
 
@@ -2535,6 +2546,21 @@ private:
 
                         slot->prompt.clear();
                         slot->prompt.tokens = std::move(restored);
+
+                        // KVFIX-DFT: restore the draft (speculative) context state to match tgt.
+                        if (ctx_dft) {
+                            const std::string dftpath = filepath + ".dft";
+                            FILE * fdft = fopen(dftpath.c_str(), "rb");
+                            if (fdft) {
+                                fseek(fdft, 0, SEEK_END); long szd = ftell(fdft); fseek(fdft, 0, SEEK_SET);
+                                std::vector<uint8_t> bufd(szd > 0 ? szd : 0);
+                                const size_t rd = szd > 0 ? fread(bufd.data(), 1, (size_t) szd, fdft) : 0;
+                                fclose(fdft);
+                                if (rd == (size_t) szd && szd > 0) {
+                                    llama_state_seq_set_data_ext(ctx_dft, bufd.data(), bufd.size(), slot->id, LLAMA_STATE_SEQ_FLAGS_NONE);
+                                }
+                            }
+                        }
                     } catch (const std::exception & err) {
                         slot->prompt_clear();
                         send_error(task, std::string("Unable to restore slot: ") + err.what(), ERROR_TYPE_INVALID_REQUEST);
@@ -3270,10 +3296,22 @@ private:
                                     }
 
                                     if (do_reset) {
-                                        SLT_TRC(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
-                                                "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
-                                        pos_next = 0;
-                                        n_past = 0;
+                                        // Hybrid/recurrent memory keeps only a running state, so the
+                                        // pos_min gate above wants a checkpoint. But if the memory
+                                        // supports bounded recurrent-state rollback (n_rs_seq) and the
+                                        // reuse boundary is within that budget, we can safely reuse the
+                                        // restored prefix: seq_rm rolls the running state back using the
+                                        // persisted snapshots. Otherwise fall back to full reprocess.
+                                        const int32_t   n_rs     = (int32_t) llama_n_rs_seq(ctx_tgt);
+                                        const llama_pos rollback = pos_min - n_past + 1;
+                                        if (n_rs > 0 && rollback <= (llama_pos) n_rs) {
+                                            SLT_DBG(slot, "recurrent reuse: rollback = %d <= n_rs_seq = %d, keeping n_past = %d\n", (int) rollback, n_rs, n_past);
+                                        } else {
+                                            SLT_TRC(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
+                                                    "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
+                                            pos_next = 0;
+                                            n_past = 0;
+                                        }
                                     }
                                 }
                             }
